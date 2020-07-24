@@ -42,7 +42,7 @@ typedef struct Z_XYZ_Var {    // Holds values for vairables X, Y and Z
 
 ZF(AddGroup) ZF(ViewGroup) ZF(GetGroup) ZF(GetAllGroups) ZF(RemoveGroup) ZF(RemoveAllGroups)
 ZF(AddScene) ZF(ViewScene) ZF(RemoveScene) ZF(RemoveAllScenes) ZF(RecallScene) ZF(StoreScene) ZF(GetSceneMembership)
-//ZF(Power) ZF(Dimmer) 
+//ZF(Power) ZF(Dimmer)
 ZF(DimmerUp) ZF(DimmerDown) ZF(DimmerStop)
 ZF(ResetAlarm) ZF(ResetAllAlarms)
 //ZF(Hue) ZF(Sat) ZF(CT)
@@ -50,12 +50,15 @@ ZF(HueSat) ZF(Color)
 ZF(ShutterOpen) ZF(ShutterClose) ZF(ShutterStop) ZF(ShutterLift) ZF(ShutterTilt) ZF(Shutter)
 //ZF(Occupancy)
 ZF(DimmerMove) ZF(DimmerStep) ZF(DimmerStepUp) ZF(DimmerStepDown)
-ZF(HueMove) ZF(HueStep) ZF(HueStepUp) ZF(HueStepDown) ZF(SatMove) ZF(SatStep) ZF(ColorMove) ZF(ColorStep) ZF(ColorTempStep) ZF(ColorTempStepUp) ZF(ColorTempStepDown) 
+ZF(HueMove) ZF(HueStep) ZF(HueStepUp) ZF(HueStepDown) ZF(SatMove) ZF(SatStep) ZF(ColorMove) ZF(ColorStep)
+ZF(ColorTempMoveUp) ZF(ColorTempMoveDown) ZF(ColorTempMoveStop) ZF(ColorTempMove)
+ZF(ColorTempStep) ZF(ColorTempStepUp) ZF(ColorTempStepDown)
 ZF(ArrowClick) ZF(ArrowHold) ZF(ArrowRelease) ZF(ZoneStatusChange)
 
 ZF(xxxx00) ZF(xxxx) ZF(01xxxx) ZF(03xxxx) ZF(00) ZF(01) ZF() ZF(xxxxyy) ZF(00190200) ZF(01190200) ZF(xxyyyy) ZF(xx)
 ZF(xx000A00) ZF(xx0A00) ZF(xxyy0A00) ZF(xxxxyyyy0A00) ZF(xxxx0A00) ZF(xx0A)
 ZF(xx190A00) ZF(xx19) ZF(xx190A) ZF(xxxxyyyy) ZF(xxxxyyzz) ZF(xxyyzzzz) ZF(xxyyyyzz)
+ZF(01xxxx000000000000) ZF(03xxxx000000000000) ZF(00xxxx000000000000) ZF(xxyyyy000000000000)
 ZF(00xx0A00) ZF(01xx0A00) ZF(03xx0A00) ZF(01xxxx0A0000000000) ZF(03xxxx0A0000000000) ZF(xxyyyy0A0000000000)
 
 // Cluster specific commands
@@ -119,8 +122,12 @@ const Z_CommandConverter Z_Commands[] PROGMEM = {
   { Z(SatStep),        0x0300, 0x05, 0x01,   Z(xx190A) },
   { Z(ColorMove),      0x0300, 0x08, 0x01,   Z(xxxxyyyy) },
   { Z(ColorStep),      0x0300, 0x09, 0x01,   Z(xxxxyyyy0A00) },
-  { Z(ColorTempStepUp),  0x0300, 0x4C, 0x01,   Z(01xxxx0A0000000000) },     //xxxx = step
-  { Z(ColorTempStepDown),0x0300, 0x4C, 0x01,   Z(03xxxx0A0000000000) },     //xxxx = step
+  { Z(ColorTempMoveUp),  0x0300, 0x4B, 0x01, Z(01xxxx000000000000) },
+  { Z(ColorTempMoveDown),0x0300, 0x4B, 0x01, Z(03xxxx000000000000) },
+  { Z(ColorTempMoveStop),0x0300, 0x4B, 0x01, Z(00xxxx000000000000) },
+  { Z(ColorTempMove),  0x0300, 0x4B, 0x01,   Z(xxyyyy000000000000) },
+  { Z(ColorTempStepUp),  0x0300, 0x4C, 0x01, Z(01xxxx0A0000000000) },
+  { Z(ColorTempStepDown),0x0300, 0x4C, 0x01, Z(03xxxx0A0000000000) },
   { Z(ColorTempStep),  0x0300, 0x4C, 0x01,   Z(xxyyyy0A0000000000) },     //xx = 0x01 up, 0x03 down, yyyy = step
   // Tradfri
   { Z(ArrowClick),     0x0005, 0x07, 0x01,   Z(xx) },         // xx == 0x01 = left, 0x00 = right
@@ -182,6 +189,7 @@ int32_t Z_ReadAttrCallback(uint16_t shortaddr, uint16_t groupaddr, uint16_t clus
     }
     ZigbeeZCLSend_Raw(shortaddr, groupaddr, cluster, endpoint, ZCL_READ_ATTRIBUTES, false, 0, attrs, attrs_len, true /* we do want a response */, zigbee_devices.getNextSeqNumber(shortaddr));
   }
+  return 0;  // Fix GCC 10.1 warning
 }
 
 
@@ -190,6 +198,7 @@ int32_t Z_Unreachable(uint16_t shortaddr, uint16_t groupaddr, uint16_t cluster, 
   if (BAD_SHORTADDR != shortaddr) {
     zigbee_devices.setReachable(shortaddr, false);     // mark device as reachable
   }
+  return 0;  // Fix GCC 10.1 warning
 }
 
 // set a timer to read back the value in the future
