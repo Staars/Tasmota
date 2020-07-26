@@ -27,6 +27,8 @@
 #define XDRV_91           91
 #include <LilyGoWatch.h>
 #include <lvgl/lvgl.h>
+#include "esp32-hal-cpu.h"
+
 
 TTGOClass *ttgo;
 LV_IMG_DECLARE(tm_logo_name);
@@ -38,7 +40,8 @@ LV_IMG_DECLARE(tm_charge);
 LV_IMG_DECLARE(tm_battery);
 
 struct {
-  lv_style_t style;
+  lv_style_t styleBig;
+  lv_style_t styleSmall;
   lv_obj_t *date;
   lv_obj_t *time;
   lv_obj_t *version;
@@ -77,6 +80,10 @@ void TTGOwake(){
   ttgo->displayWakeup();
   ttgo->openBL();
   TTGO.state.lightSleep = 0;
+  if(TTGO.state.isVBUSPlug) {
+    setCpuFrequencyMhz(80);
+  }
+  else setCpuFrequencyMhz(40);
 }
 
 void TTGOlightSleep(){
@@ -85,6 +92,22 @@ void TTGOlightSleep(){
   ttgo->bma->enableStepCountInterrupt(false);
   ttgo->displaySleep();
   TTGO.state.lightSleep = 1;
+  setCpuFrequencyMhz(10);
+}
+
+void TTGOinitTime(void){
+  ttgo->rtc->check();
+  RTC_Date _time = ttgo->rtc->getDateTime();
+
+  TIME_T _sysTime;
+  _sysTime.year = _time.year - 1970;
+  _sysTime.month = _time.month;
+  _sysTime.day_of_month = _time.day;
+  _sysTime.hour = _time.hour;
+  _sysTime.minute = _time.minute;
+  _sysTime.second = _time.second;
+  
+  Rtc.utc_time = MakeTime(_sysTime);
 }
 
 void TTGOInitPower(void){
@@ -137,42 +160,67 @@ void TTGOInitGyro(void){
 
 void TTGOwifiTouchCB(lv_obj_t * obj, lv_event_t event);
 void TTGOpowerCB(lv_obj_t * obj, lv_event_t event);
-static void event_handler(lv_obj_t * obj, lv_event_t e);
+static void TTGOwifiBoxevent_handler(lv_obj_t * obj, lv_event_t e);
+static void TTGOpowerBoxevent_handler(lv_obj_t * obj, lv_event_t e);
 
 void TTGOwifiTouchCB(lv_obj_t * obj, lv_event_t event){
   if(event==LV_EVENT_SHORT_CLICKED){
     AddLog_P2(LOG_LEVEL_DEBUG, PSTR("Wifi Status: %d"),WifiState());
-    static const char * btns[] ={"On", "Off", ""};
-    static lv_style_t boxStyle;
-    lv_style_copy(&boxStyle,&TTGO.style);
-    lv_style_set_text_font(&boxStyle, LV_OBJ_PART_MAIN, LV_THEME_DEFAULT_FONT_SMALL);
-    TTGO.mboxWifi = lv_msgbox_create(lv_scr_act(), NULL);
-    lv_msgbox_set_text(TTGO.mboxWifi, WiFi.localIP().toString().c_str());
-    lv_msgbox_add_btns(TTGO.mboxWifi, btns);
-    lv_obj_add_style(TTGO.mboxWifi,LV_OBJ_PART_MAIN, &boxStyle);
-    lv_obj_set_width(TTGO.mboxWifi, 220);
-    lv_obj_set_event_cb(TTGO.mboxWifi, event_handler);
-    lv_obj_align(TTGO.mboxWifi, NULL, LV_ALIGN_CENTER, 0, 0);
+
+    lv_obj_t *tabview;
+    tabview = lv_tabview_create(lv_scr_act(), NULL);
+    // lv_obj_set_width(tabview, 220);
+    lv_obj_add_style(tabview, LV_TABVIEW_PART_TAB_BG, &TTGO.styleSmall);
+    lv_obj_add_style(tabview, LV_TABVIEW_PART_BG, &TTGO.styleSmall);
+    lv_obj_t *tab1 = lv_tabview_add_tab(tabview, "Wifi");
+    lv_obj_t *tab2 = lv_tabview_add_tab(tabview, "MQTT");
+
+    lv_obj_t * label = lv_label_create(tab1, NULL);
+    char _buf[300];
+
+    sprintf(_buf, "Wifi:\n"
+                  "IP: %s\n"
+                  "MAC: %s\n"
+                  "Gateway: %s\n",
+                  WiFi.localIP().toString().c_str(),WiFi.macAddress().c_str(),
+                  IPAddress(Settings.ip_address[1]).toString().c_str()
+                  );
+
+    lv_label_set_text(label,_buf);
+
+    label = lv_label_create(tab2, NULL);
+    sprintf(_buf, "MQTT:\n"
+                  "Host: %s\n"
+                  "Port: %u\n"
+                  "User: %s\n"
+                  "Client: %s\n"
+                  "Topic: %s\n",
+                  SettingsText(SET_MQTT_HOST),Settings.mqtt_port,SettingsText(SET_MQTT_USER),
+                  mqtt_client,SettingsText(SET_MQTT_TOPIC)
+                  );
+    lv_label_set_text(label, _buf);
+
+    lv_obj_t * btnLabel;
+    lv_obj_t * btn1 = lv_btn_create(tabview, NULL);
+    lv_obj_set_event_cb(btn1, TTGOpowerBoxevent_handler);
+    lv_obj_align(btn1, tabview, LV_ALIGN_IN_BOTTOM_RIGHT, 0, 0);
+
+    btnLabel = lv_label_create(btn1, NULL);
+    lv_label_set_text(btnLabel, "Close");
   }
 }
-static void event_handler(lv_obj_t * obj, lv_event_t e)
+
+static void TTGOwifiBoxevent_handler(lv_obj_t * obj, lv_event_t e)
 {
   if(e == LV_EVENT_CLICKED) {
-    int _index = lv_msgbox_get_active_btn(obj);
-    switch(_index){
-      case 0:
-        AddLog_P2(LOG_LEVEL_DEBUG, PSTR("Wifi will start"));
-        Settings.flag4.network_wifi=1;
-        WifiConnect();
-        break;
-      case 1:
-        AddLog_P2(LOG_LEVEL_DEBUG, PSTR("Wifi will shutdown"));
-        Settings.flag4.network_wifi=0;
-        WifiShutdown(false);
-        WifiSetMode(WIFI_OFF);
-        break;
-    }
-    lv_obj_del(TTGO.mboxWifi);
+    lv_obj_del(lv_obj_get_parent(obj));
+  }
+}
+
+static void TTGOpowerBoxevent_handler(lv_obj_t * obj, lv_event_t e)
+{
+  if(e == LV_EVENT_CLICKED) {
+    lv_obj_del(lv_obj_get_parent(obj));
   }
 }
 
@@ -180,6 +228,62 @@ static void event_handler(lv_obj_t * obj, lv_event_t e)
 void TTGOpowerCB(lv_obj_t * obj, lv_event_t event){
   if(event==LV_EVENT_SHORT_CLICKED){
     AddLog_P2(LOG_LEVEL_DEBUG, PSTR("Power Click"));
+    /*Create a Tab view object*/
+    lv_obj_t *tabview;
+    tabview = lv_tabview_create(lv_scr_act(), NULL);
+    lv_obj_add_style(tabview, LV_TABVIEW_PART_TAB_BG, &TTGO.styleSmall);
+    lv_obj_add_style(tabview, LV_TABVIEW_PART_BG, &TTGO.styleSmall);
+    lv_obj_t *tab1 = lv_tabview_add_tab(tabview, "Info");
+    lv_obj_t *tab2 = lv_tabview_add_tab(tabview, "Setting");
+    lv_obj_t *tab3 = lv_tabview_add_tab(tabview, "Chip");
+
+    lv_obj_t * label = lv_label_create(tab1, NULL);
+    char _buf[300];
+
+    sprintf(_buf, "VBUS:\n"
+                      "Voltage: %.02f mV\n"
+                      "Current: %.02f mV\n"
+                      "Battery:\n"
+                      "Voltage: %.02f mV\n"
+                      "DischargeCur: %.02f mA\n"
+                      "Level: %u %%\n"
+                      "CPU:\n"
+                      "Frequency: %u MHz\n\n\n\n",
+                      ttgo->power->getVbusVoltage(),ttgo->power->getVbusCurrent(),
+                      ttgo->power->getBattVoltage(),
+                      ttgo->power->getBattDischargeCurrent(),ttgo->power->getBattPercentage(),
+                      getCpuFrequencyMhz()
+                      );
+
+    lv_label_set_text(label,_buf);
+
+    label = lv_label_create(tab2, NULL);
+    lv_label_set_text(label, "TODO");
+
+    sprintf(_buf, "Chip:\n"
+                  "ID: %d\n"
+                  "Flash size: %d kB\n"
+                  "Prog flash size: %d kB\n"
+                  "Sketch size: %d kB\n"
+                  "Free sketch size: %d kB\n"
+                  "Free memory: %d kB\n"
+                  "Max PS memory: %d kB\n"
+                  "Free PS memory: %d kB\n\n\n\n",
+                  ESP_getChipId(),ESP.getFlashChipRealSize() / 1024,
+                  ESP.getFlashChipSize() / 1024,ESP_getSketchSize() / 1024, 
+                  ESP.getFreeSketchSpace() / 1024,ESP_getFreeHeap() / 1024,
+                  ESP.getPsramSize() / 1024,ESP.getFreePsram() / 1024
+                  );
+    label = lv_label_create(tab3, NULL);
+    lv_label_set_text(label,_buf);
+
+    lv_obj_t * btnLabel;
+    lv_obj_t * btn1 = lv_btn_create(tabview, NULL);
+    lv_obj_set_event_cb(btn1, TTGOpowerBoxevent_handler);
+    lv_obj_align(btn1, tabview, LV_ALIGN_IN_BOTTOM_RIGHT, 0, 0);
+
+    btnLabel = lv_label_create(btn1, NULL);
+    lv_label_set_text(btnLabel, "Close");
   }
 }
 
@@ -192,19 +296,18 @@ void TTGOInitWatchFace(void){
 
 
     // style
-    lv_style_init(&TTGO.style);
-    lv_style_set_text_color(&TTGO.style, LV_STATE_DEFAULT, LV_COLOR_SILVER);
-    lv_style_set_bg_color(&TTGO.style, LV_STATE_DEFAULT, LV_COLOR_BLACK);
-    lv_style_set_border_color(&TTGO.style, LV_STATE_DEFAULT, LV_COLOR_BLACK);
+    lv_style_init(&TTGO.styleBig);
+    lv_style_set_text_color(&TTGO.styleBig, LV_STATE_DEFAULT, LV_COLOR_SILVER);
+    lv_style_set_bg_color(&TTGO.styleBig, LV_STATE_DEFAULT, LV_COLOR_BLACK);
+    lv_style_set_border_color(&TTGO.styleBig, LV_STATE_DEFAULT, LV_COLOR_BLACK);
 
-    static lv_style_t styleSmall;
-    lv_style_copy(&styleSmall,&TTGO.style);
-    // lv_style_init(&styleSmall);
-    lv_style_set_text_font(&styleSmall, LV_OBJ_PART_MAIN, LV_THEME_DEFAULT_FONT_SMALL);
+    lv_style_copy(&TTGO.styleSmall,&TTGO.styleBig);
+    // lv_style_init(&TTGO.styleSmall);
+    lv_style_set_text_font(&TTGO.styleSmall, LV_OBJ_PART_MAIN, LV_THEME_DEFAULT_FONT_SMALL);
 
     //background
     lv_obj_t * mainScreen = lv_scr_act();
-    lv_obj_add_style(mainScreen,LV_OBJ_PART_MAIN, &TTGO.style);
+    lv_obj_add_style(mainScreen,LV_OBJ_PART_MAIN, &TTGO.styleBig);
 
     lv_obj_t *logo_name = lv_img_create(mainScreen, NULL);
     lv_img_set_src(logo_name, &tm_logo_name);
@@ -238,7 +341,7 @@ void TTGOInitWatchFace(void){
     lv_img_set_src(TTGO.pictWifi, &tm_wifi_on);
 
     TTGO.battLevel = lv_label_create(topLeft, nullptr);
-    lv_obj_add_style(TTGO.battLevel, LV_OBJ_PART_MAIN, &styleSmall);
+    lv_obj_add_style(TTGO.battLevel, LV_OBJ_PART_MAIN, &TTGO.styleSmall);
     lv_obj_align(TTGO.battLevel,TTGO.pictPower, LV_ALIGN_OUT_RIGHT_MID, 10, 0);
 
     // date and time
@@ -246,7 +349,7 @@ void TTGOInitWatchFace(void){
     lv_obj_align(TTGO.date, NULL, LV_ALIGN_CENTER, -20, 35);
 
     TTGO.time = lv_label_create(mainScreen, nullptr);
-    lv_obj_add_style(TTGO.time, LV_OBJ_PART_MAIN, &TTGO.style);
+    lv_obj_add_style(TTGO.time, LV_OBJ_PART_MAIN, &TTGO.styleBig);
     lv_label_set_text(TTGO.time, " ");
     lv_obj_align(TTGO.time, TTGO.date, LV_ALIGN_OUT_BOTTOM_MID, -75, 5);
 
@@ -289,8 +392,7 @@ void TTGOInit(void){
     ttgo = TTGOClass::getWatch();
     ttgo->begin();
 
-    ttgo->rtc->check();
-
+    TTGOinitTime();
     TTGOInitPower();
     TTGOInitWatchFace();
     TTGOInitGyro();
@@ -301,10 +403,12 @@ void TTGOirqscheduler(){
   if (ttgo->power->isVbusPlugInIRQ()) {
     AddLog_P2(LOG_LEVEL_DEBUG, PSTR("Power Plug In"));
     TTGO.state.isVBUSPlug = 1;
+    setCpuFrequencyMhz(80);
   }
   if (ttgo->power->isVbusRemoveIRQ()) {
     AddLog_P2(LOG_LEVEL_DEBUG, PSTR("Power Remove"));
     TTGO.state.isVBUSPlug = 0;
+    setCpuFrequencyMhz(40);
   }
   if (ttgo->power->isPEKShortPressIRQ()) {
     TTGOBtnPressed();
@@ -350,7 +454,7 @@ void TTGOLoop(void){
       TTGO.state.timeWasSynced=1;
       TIME_T _tm;
       BreakTime(Rtc.local_time,_tm) ;
-      ttgo->rtc->setDateTime(_tm.year+1970,_tm.month, _tm.day_of_month, _tm.hour, _tm.minute, _tm.second);
+      ttgo->rtc->setDateTime(_tm.year,_tm.month, _tm.day_of_month, _tm.hour, _tm.minute, _tm.second);
     }
   }
 }
@@ -367,7 +471,7 @@ void TTGOShow(bool json){
     }
     Accel _acc;
     if(ttgo->bma->getAccel(_acc))ResponseAppend_P(PSTR(",\"Acc\":{\"X\":%d,\"Y\":%d,\"Z\":%d"),_acc.x,_acc.y,_acc.z);
-
+    ResponseAppend_P(PSTR(",\"ESP\":{\"CPUfrequency\":%.u MHz}"),getCpuFrequencyMhz());
 #ifdef USE_WEBSERVER
   } else {
 
