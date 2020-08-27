@@ -58,7 +58,10 @@ struct {
   lv_obj_t *calculatorNum1;
   lv_obj_t *calculatorNum2;
   lv_obj_t *calculatorResult;
+<<<<<<< HEAD
 
+=======
+>>>>>>> badca01e76120a032091d610b0cd77df8e4d558e
   struct{
     uint32_t isCharging:1;
     uint32_t batteryConnected:1;
@@ -73,12 +76,25 @@ struct {
 } TTGO;
 
 void TTGOBtnPressed(){
+<<<<<<< HEAD
   if(TTGO.state.lightSleep) {
     TTGOwake();
   }
   else{
     TTGO.state.singleButtonPress=1;
   }
+=======
+  // static bool _bl_on = true;
+  // if(_bl_on){
+  //   TTGOlightSleep();
+  //   _bl_on=false;
+  // }
+  // else{
+  //   TTGOwake();
+  //   _bl_on=true;
+  // }
+  TTGO.state.singleButtonPress=1;
+>>>>>>> badca01e76120a032091d610b0cd77df8e4d558e
 }
 
 void TTGOwake(){
