@@ -13,7 +13,13 @@ Written by Lewis he //https://github.com/lewisxhe
 
 #pragma once
 
-#include "DBG.h"
+#define LILYGO_DEBUG Serial
+
+#ifdef LILYGO_DEBUG
+#define DBGX(...)        LILYGO_DEBUG.printf(__VA_ARGS__)
+#else
+#define DBGX(...)
+#endif
 
 #include <SPI.h>
 
@@ -60,16 +66,22 @@ Written by Lewis he //https://github.com/lewisxhe
 
 #ifdef LILYGO_WATCH_LVGL
 #include "lvgl/lvgl.h"
-// #include "./font/font.h"
 #endif
 
 #ifdef LILYGO_WATCH_HAS_AXP202
-#include "./drive/axp/axp20x.h"
+#include "drive/axp/axp20x.h"
 #endif
 
-#include "./drive/i2c/i2c_bus.h"
-#include "./drive/tft/bl.h"
+#ifdef LILYGO_WATCH_HAS_MPU6050
+#include "drive/mup6050/MPU6050.h"
+#endif
 
+#include "drive/i2c/i2c_bus.h"
+#include "drive/tft/bl.h"
+
+
+
+#define ENABLE_LVGL_FLUSH_DMA       //Use DMA for transmission by default
 
 class TTGOClass
 {
@@ -102,12 +114,16 @@ public:
 
 #ifdef LILYGO_WATCH_HAS_BUTTON
         //In the 2020 version, Button IO36 is not used.
-        ttgobutton = new Button2(USER_BUTTON);
+        button = new Button2(USER_BUTTON);
 #endif  /*LILYGO_WATCH_HAS_BUTTON*/
 
 #ifdef LILYGO_WATCH_HAS_AXP202
         power = new AXP20X_Class();
 #endif  /*LILYGO_WATCH_HAS_AXP202*/
+
+#ifdef LILYGO_WATCH_HAS_MPU6050
+        mpu = new MPU6050();
+#endif  /*LILYGO_WATCH_HAS_MPU6050*/
 
         initPower();
         initTFT();
@@ -282,7 +298,7 @@ public:
 #ifdef LILYGO_WATCH_HAS_BLACKLIGHT
     void openBL()
     {
-#if  defined(LILYGO_WATCH_2020_V1) && defined(LILYGO_WATCH_HAS_AXP202)
+#if  !defined(LILYGO_WATCH_2020_V1) && defined(LILYGO_WATCH_HAS_AXP202)
         power->setPowerOutPut(AXP202_LDO2, AXP202_ON);
 #endif  /*LILYGO_WATCH_2020_V1*/
         bl->on();
@@ -290,7 +306,7 @@ public:
 
     void closeBL()
     {
-#if  defined(LILYGO_WATCH_2020_V1) && defined(LILYGO_WATCH_HAS_AXP202)
+#if  !defined(LILYGO_WATCH_2020_V1) && defined(LILYGO_WATCH_HAS_AXP202)
         power->setPowerOutPut(AXP202_LDO2, AXP202_OFF);
 #endif  /*LILYGO_WATCH_2020_V1*/
         bl->off();
@@ -308,27 +324,43 @@ public:
      *              LVGL
      * ***************************************/
 #if  defined(LILYGO_WATCH_LVGL) && defined(LILYGO_WATCH_HAS_DISPLAY)
+    void lvgl_whirling(uint8_t rot)
+    {
+        tft->setRotation(rot);
+        disp_drv.hor_res = tft->width();
+        disp_drv.ver_res = tft->height();
+        lv_disp_drv_update(lv_disp_get_default(), &disp_drv);
+    }
+
     bool lvgl_begin()
     {
+        if (tft == nullptr) {
+            return false;
+        }
         lv_init();
-        lv_disp_drv_t disp_drv;
         lv_indev_drv_t indev_drv;
         lv_disp_drv_init(&disp_drv);
         static lv_disp_buf_t disp_buf;
 
+#if     defined(LILYGO_BLOCK_TOUCHSCREEN) && defined(LILYGO_WATCH_BLOCK)
+        const uint16_t buffer_size = 320 * 100;
+#else
+        const uint16_t buffer_size = 240 * 100;
+#endif
+
 #ifdef TWATCH_USE_PSRAM_ALLOC_LVGL
-        lv_color_t *buf1 = (lv_color_t *)heap_caps_calloc(LV_HOR_RES_MAX * 100, sizeof(lv_color_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT );
+        lv_color_t *buf1 = (lv_color_t *)heap_caps_calloc(buffer_size, sizeof(lv_color_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT );
         if (!buf1) {
             DBGX("alloc failed\n");
             return false;
         }
 #else
-        static lv_color_t buf1[LV_HOR_RES_MAX * 100];
+        static lv_color_t buf1[buffer_size];
 #endif  /*TWATCH_USE_PSRAM_ALLOC_LVGL*/
 
-        lv_disp_buf_init(&disp_buf, buf1, NULL, LV_HOR_RES_MAX * 100);
-        disp_drv.hor_res = TFT_WIDTH;
-        disp_drv.ver_res = TFT_HEIGHT;
+        lv_disp_buf_init(&disp_buf, buf1, NULL, buffer_size);
+        disp_drv.hor_res = tft->width();
+        disp_drv.ver_res = tft->height();
         disp_drv.flush_cb = disp_flush;
         /*Set a display buffer*/
         disp_drv.buffer = &disp_buf;
@@ -387,7 +419,7 @@ public:
 #endif
 
 #ifdef LILYGO_WATCH_HAS_BUZZER
-    ttgoBuzzer *buzzer = nullptr;
+    // Buzzer *ttgobuzzer = nullptr;
 #endif
 
 #ifdef LILYGO_WATCH_HAS_BMA423
@@ -395,7 +427,11 @@ public:
 #endif
 
 #ifdef LILYGO_WATCH_HAS_BUTTON
-    Button2 *ttgobutton = nullptr;
+    Button2 *button = nullptr;
+#endif
+
+#ifdef LILYGO_WATCH_HAS_MPU6050
+    MPU6050 *mpu = nullptr;
 #endif
 
 #ifdef LILYGO_WATCH_HAS_MOTOR
@@ -607,6 +643,7 @@ private:
         struct bma423_axes_remap remap_data;
 
         if (!bma->begin()) {
+            DBGX("Begin BMA423 FAIL");
             return false;
         }
         // T-Watch 2020 and 2019 use different mapping axes
@@ -628,9 +665,11 @@ private:
         bma->set_remap_axes(&remap_data);
 
 #elif defined(LILYGO_WATCH_HAS_MPU6050)
-        //Not yet
-        //Not yet
-        //Not yet
+        if (!mpu->begin(axpReadBytes, axpWriteBytes,
+                        MPU6050_SCALE_2000DPS, MPU6050_RANGE_2G)) {
+            DBGX("Begin MPU6050 FAIL");
+            return false;
+        }
 #endif
         return true;
     }
@@ -645,10 +684,26 @@ private:
         //is shared with the backlight, so LDO2 cannot be turned off
         power->setPowerOutPut(AXP202_LDO2, AXP202_ON);
 #endif
+        int16_t w = 240;
+        int16_t h = 240;
+        uint32_t drv = 0x7789;
+        uint32_t freq = 40000000;
+#if defined(LILYGO_BLOCK_TOUCHSCREEN) && defined(LILYGO_WATCH_BLOCK)
+        w = 320;
+        h = 480;
+        drv = 0x7796;
+        freq = 27000000;
+#endif
 
-        tft = new TFT_eSPI();
+        tft = new TFT_eSPI(w, h);
+
+        tft->setDriver(drv, freq);
 
         tft->init();
+
+#ifdef ENABLE_LVGL_FLUSH_DMA
+        tft->initDMA(); // To use SPI DMA you must call initDMA() to setup the DMA engine
+#endif
 
 #ifdef  LILYGO_WATCH_2020_V1
         // Set default initial orientation
@@ -671,10 +726,8 @@ private:
         if (!touch->begin(Wire1)) {
             DBGX("Begin touch FAIL");
         }
-#elif defined(LILYGO_EINK_TOUCHSCREEN)
+#elif defined(LILYGO_EINK_TOUCHSCREEN) || defined(LILYGO_BLOCK_TOUCHSCREEN)
         touch = new FT5206_Class();
-        // This is just a sign
-        touch->setType(FT5X0X_VENDID);
         if (!touch->begin(axpReadBytes, axpWriteBytes)) {
             DBGX("Begin touch FAIL");
         } else {
@@ -690,7 +743,7 @@ private:
         if (ret == AXP_FAIL) {
             DBGX("AXP Power begin failed");
         } else {
-            //Change the button boot time to 4 seconds
+            //Change the shutdown time to 4 seconds
             power->setShutdownTime(AXP_POWER_OFF_TIME_4S);
             // Turn off the charging instructions, there should be no
             power->setChgLEDMode(AXP20X_LED_OFF);
@@ -744,12 +797,6 @@ private:
 #endif  /*LILYGO_WATCH_HAS_NFC*/
 
 
-#if defined(LILYGO_WATCH_LVGL) && defined(LILYGO_WATCH_HAS_DISPLAY)
-    // static void disp_flush(lv_disp_drv_t *disp_drv, const lv_area_t *area, lv_color_t *color_p);
-    // static bool touchpad_read(lv_indev_drv_t *indev_drv, lv_indev_data_t *data);
-#endif  /*LILYGO_WATCH_LVGL , LILYGO_WATCH_HAS_DISPLAY*/
-
-
     I2CBus *i2c = nullptr;
 
     static TTGOClass *_ttgo;
@@ -760,6 +807,10 @@ private:
 
 #ifdef LILYGO_WATCH_HAS_TOUCH
     FT5206_Class *touch = nullptr;
+#endif
+
+#if  defined(LILYGO_WATCH_LVGL) && defined(LILYGO_WATCH_HAS_DISPLAY)
+    lv_disp_drv_t disp_drv;
 #endif
 
 protected:
@@ -777,9 +828,27 @@ protected:
         }
         p = _ttgo->touch->getPoint();
 
-#if     0 //defined(LILYGO_WATCH_BLOCK) &&defined(LILYGO_EINK_TOUCHSCREEN)
-        // x = p.x;
-        // y = p.y;
+#if     defined(LILYGO_BLOCK_TOUCHSCREEN) && defined(LILYGO_WATCH_BLOCK)
+        uint8_t rotation = _ttgo->tft->getRotation();
+        switch (rotation) {
+        case 1:
+            x = p.y;
+            y = _ttgo->tft->height() - p.x;
+            break;
+        case 2:
+            x = _ttgo->tft->width() - p.x;
+            y = _ttgo->tft->height() - p.y;
+            break;
+        case 3:
+            x = _ttgo->tft->width() - p.y;
+            y = p.x;
+            break;
+        case 0:
+        default:
+            x = p.x;
+            y = p.y;
+            break;
+        }
 #elif   defined(LILYGO_WATCH_2019_WITH_TOUCH)
         uint8_t rotation = _ttgo->tft->getRotation();
         int16_t _x = map(p.x, 0, 320, 0, 240);
@@ -788,12 +857,15 @@ protected:
         case 1:
             x = _y;
             y = TFT_HEIGHT - _x;
+            break;
         case 2:
             x = TFT_WIDTH - _x;
             y = TFT_HEIGHT - _y;
+            break;
         case 3:
             x = TFT_WIDTH - _y;
             y = _x;
+            break;
         case 0:
         default:
             x = _x;
@@ -805,12 +877,15 @@ protected:
         case 0:
             x = TFT_WIDTH - p.x;
             y = TFT_HEIGHT - p.y;
+            break;
         case 1:
             x = TFT_WIDTH - p.y;
-            y = TFT_HEIGHT - p.x;
+            y = p.x;
+            break;
         case 3:
             x = p.y;
             y = TFT_HEIGHT - p.x;
+            break;
         case 2:
         default:
             x = p.x;
@@ -824,24 +899,25 @@ protected:
 #if defined(LILYGO_WATCH_LVGL) && defined(LILYGO_WATCH_HAS_DISPLAY)
     static void disp_flush(lv_disp_drv_t *disp_drv, const lv_area_t *area, lv_color_t *color_p)
     {
+
         uint32_t size = (area->x2 - area->x1 + 1) * (area->y2 - area->y1 + 1) ;
+
+        // Use DMA for transfer
+#ifdef ENABLE_LVGL_FLUSH_DMA
+        _ttgo->tft->startWrite();
+        _ttgo->tft->setAddrWindow(area->x1, area->y1, (area->x2 - area->x1 + 1), (area->y2 - area->y1 + 1)); /* set the working window */
+        _ttgo->tft->pushPixelsDMA(( uint16_t *)color_p, size);
+        _ttgo->tft->endWrite();
+#else
         _ttgo->tft->setAddrWindow(area->x1, area->y1, (area->x2 - area->x1 + 1), (area->y2 - area->y1 + 1)); /* set the working window */
         _ttgo->tft->pushColors(( uint16_t *)color_p, size, false);
+#endif
         lv_disp_flush_ready(disp_drv);
     }
 
 #if defined(LILYGO_WATCH_LVGL) && defined(LILYGO_WATCH_HAS_TOUCH)
     static bool touchpad_read(lv_indev_drv_t *indev_drv, lv_indev_data_t *data)
     {
-//         static TP_Point p;
-//         uint8_t rotation = _ttgo->tft->getRotation();
-//         data->state = _ttgo->touch->touched() ? LV_INDEV_STATE_PR : LV_INDEV_STATE_REL;
-//         if (data->state == LV_INDEV_STATE_PR) {
-//             p = _ttgo->touch->getPoint(0, rotation);
-//         }
-//         /*Set the coordinates (if released use the last pressed coordinates)*/
-//         data->point.x = p.x;
-//         data->point.y = p.y;
         data->state = _ttgo->getTouchXY(data->point.x, data->point.y) ?  LV_INDEV_STATE_PR : LV_INDEV_STATE_REL;
         return false; /*Return false because no moare to be read*/
     }

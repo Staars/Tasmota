@@ -20,8 +20,8 @@
  *====================*/
 
 /* Maximal horizontal and vertical resolution to support by the library.*/
-#define LV_HOR_RES_MAX          (240)
-#define LV_VER_RES_MAX          (240)
+#define LV_HOR_RES_MAX          (480)
+#define LV_VER_RES_MAX          (320)
 
 /* Color depth:
  * - 1:  1 byte per pixel
@@ -350,11 +350,11 @@ typedef void *lv_indev_drv_user_data_t;             /*Type of user data in the i
 #define LV_FONT_MONTSERRAT_34    0
 #define LV_FONT_MONTSERRAT_36    0
 #define LV_FONT_MONTSERRAT_38    0
-#define LV_FONT_MONTSERRAT_40    0
+#define LV_FONT_MONTSERRAT_40    1
 #define LV_FONT_MONTSERRAT_42    0
 #define LV_FONT_MONTSERRAT_44    0
 #define LV_FONT_MONTSERRAT_46    0
-#define LV_FONT_MONTSERRAT_48    1
+#define LV_FONT_MONTSERRAT_48    0
 
 /* Demonstrate special features */
 #define LV_FONT_MONTSERRAT_12_SUBPX      0
@@ -419,11 +419,11 @@ typedef void *lv_font_user_data_t;
 #define LV_THEME_DEFAULT_INIT               lv_theme_material_init
 #define LV_THEME_DEFAULT_COLOR_PRIMARY      LV_COLOR_BLUE
 #define LV_THEME_DEFAULT_COLOR_SECONDARY    LV_COLOR_RED
-#define LV_THEME_DEFAULT_FLAG               LV_THEME_MATERIAL_FLAG_LIGHT
+#define LV_THEME_DEFAULT_FLAG               LV_THEME_MATERIAL_FLAG_DARK
 #define LV_THEME_DEFAULT_FONT_SMALL         &lv_font_montserrat_14
-#define LV_THEME_DEFAULT_FONT_NORMAL        &lv_font_montserrat_48
+#define LV_THEME_DEFAULT_FONT_NORMAL        &lv_font_montserrat_14
 #define LV_THEME_DEFAULT_FONT_SUBTITLE      &lv_font_montserrat_14
-#define LV_THEME_DEFAULT_FONT_TITLE         &lv_font_montserrat_48
+#define LV_THEME_DEFAULT_FONT_TITLE         &lv_font_montserrat_40
 
 /*=================
  *  Text settings

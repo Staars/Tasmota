@@ -101,10 +101,10 @@ public:
         _tick = new Ticker;
     };
 
-    virtual void onec()
+    virtual void onec(int duration = 200)
     {
         ledcWriteTone(_channel, _freq);
-        _tick->once_ms<uint8_t>(200, [](uint8_t channel) {
+        _tick->once_ms<uint8_t>(duration, [](uint8_t channel) {
             ledcWriteTone(channel, 0);
         }, _channel);
     };
@@ -124,10 +124,10 @@ public:
 };
 
 
-class ttgoBuzzer : public PWMToneBase
+class Buzzer : public PWMToneBase
 {
 public:
-    ttgoBuzzer(uint8_t pin, uint8_t channel = 2, int freq = 1000) : PWMToneBase(pin, channel, freq)
+    Buzzer(uint8_t pin, uint8_t channel = 2, int freq = 1000) : PWMToneBase(pin, channel, freq)
     {
     };
 };
