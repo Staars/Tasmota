@@ -48,6 +48,8 @@
 
 #if ESP_IDF_VERSION_MAJOR<4
 #define I2S_BASE_CLK (160000000L)
+#else
+#define I2S_BASE_CLK                      (2*APB_CLK_FREQ)
 #endif
 
 #define ESP32_REG(addr) (*((volatile uint32_t*)(0x3FF00000+(addr))))

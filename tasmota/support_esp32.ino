@@ -86,7 +86,7 @@ void ESP_Restart(void) {
 // Handle 20k of NVM
 
 #include <nvs.h>
-#include <rom/rtc.h>
+#include <esp32/rom/rtc.h>
 
 void NvmLoad(const char *sNvsName, const char *sName, void *pSettings, unsigned nSettingsLen) {
   nvs_handle handle;

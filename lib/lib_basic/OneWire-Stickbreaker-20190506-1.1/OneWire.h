@@ -146,6 +146,9 @@
 #define DIRECT_WRITE_HIGH(base, mask)   (GPOS = (mask))             //GPIO_OUT_W1TS_ADDRESS
 
 #elif defined(ARDUINO_ARCH_ESP32)
+#if (CONFIG_RTCIO_SUPPORT_RTC_GPIO_DESC==n)
+    #define CONFIG_RTCIO_SUPPORT_RTC_GPIO_DESC 1
+#endif
 #include <driver/rtc_io.h>
 #define PIN_TO_BASEREG(pin)             (0)
 #define PIN_TO_BITMASK(pin)             (pin)

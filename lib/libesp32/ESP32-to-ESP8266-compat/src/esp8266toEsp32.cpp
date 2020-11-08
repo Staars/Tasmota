@@ -15,9 +15,9 @@
  */
 //
 #include "Arduino.h"
-#include "lwip/apps/sntp.h"
+// #include "lwip/apps/sntp.h"
 #include <nvs.h>
-#include <rom/rtc.h>
+#include <ESP32/rom/rtc.h>
 #include <ESP8266WiFi.h>
 #include "esp8266toEsp32.h"
 

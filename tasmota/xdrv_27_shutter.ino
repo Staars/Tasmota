@@ -586,6 +586,7 @@ int32_t ShutterCalculatePosition(uint32_t i)
     } else {
       return Shutter[i].real_position;
     }
+  return 0;
 }
 
 void ShutterRelayChanged(void)
@@ -1223,7 +1224,7 @@ void CmndShutterButton(void)
         char *str_ptr;
 
         char data_copy[strlen(XdrvMailbox.data) +1];
-        strncpy(data_copy, XdrvMailbox.data, sizeof(data_copy));  // Duplicate data as strtok_r will modify it.
+        strncpy(data_copy, XdrvMailbox.data, sizeof(XdrvMailbox.data));  // Duplicate data as strtok_r will modify it.
         // Loop through the data string, splitting on ' ' seperators.
         for (char *str = strtok_r(data_copy, " ", &str_ptr); str && i < (1+4+4+1); str = strtok_r(nullptr, " ", &str_ptr), i++) {
           int field;
