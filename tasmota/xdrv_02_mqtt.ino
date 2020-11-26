@@ -219,6 +219,13 @@ bool MqttPublishLib(const char* topic, bool retained)
       TasmotaGlobal.mqtt_cmnd_blocked++;
     }
   }
+ #ifdef USE_TASMESH
+ if(MESH.role > ROLE_BROKER){
+   MESHrouteMQTTtoMESH(topic, TasmotaGlobal.mqtt_data, retained); //if we are a node, send this via ESP-Now
+   yield();
+   return true;
+ }
+ #endif //USE_TASMESH
 
   bool result = MqttClient.publish(topic, TasmotaGlobal.mqtt_data, retained);
   yield();  // #3313
@@ -255,6 +262,15 @@ void MqttDataHandler(char* mqtt_topic, uint8_t* mqtt_data, unsigned int data_len
   mqtt_data[data_len] = 0;
   char data[data_len +1];
   memcpy(data, mqtt_data, sizeof(data));
+
+#ifdef USE_TASMESH
+ #ifdef ESP32
+ if(MESH.role == ROLE_BROKER){
+   if (MESHinterceptMQTTonBroker(topic, (uint8_t*)data, data_len+1)) return; //check if this is a message for a node
+ }
+ #endif //ESP32
+ #endif //USE_TASMESH
+
 
 //  AddLog_P(LOG_LEVEL_DEBUG_MORE, PSTR(D_LOG_MQTT D_DATA_SIZE " %d, \"%s %s\""), data_len, topic, data);
 //  if (LOG_LEVEL_DEBUG_MORE <= TasmotaGlobal.seriallog_level) { Serial.println(data); }
