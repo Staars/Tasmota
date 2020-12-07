@@ -88,7 +88,7 @@ struct mesh_packet_header_t{ //ToDo: Maybe, we do not need this
 
 struct mesh_peer_t{
   uint8_t MAC[6];
-  uint32_t lmfp; //time of last message from peer
+  uint32_t lastMessageFromPeer; //time of last message from peer
 #ifdef ESP32
   char topic[MESH_TOPICSZ];
 #endif //ESP32
@@ -112,7 +112,7 @@ struct{
   uint8_t broker[6] = {0};
   uint8_t role;
   uint8_t channel;  //Wifi channel
-  uint32_t lmfb;    //time of last message from broker
+  uint32_t lastMessageFromBroker;    //time of last message from broker
   uint32_t lmfap;   //time of last message from any peer
   uint8_t key[32];
   mesh_broker_flags_t flags;
@@ -213,7 +213,7 @@ void MESHsendPeerList(void){ //we send this list only to the peers, that can dir
 void MESHcheckPeerList(const uint8_t *MAC){
   for(auto &_peer : MESH.peers){
     if(memcmp(_peer.MAC,MAC,6)==0){
-      _peer.lmfp = millis();
+      _peer.lastMessageFromPeer = millis();
       return;
     }
   }
@@ -240,7 +240,7 @@ uint8_t MESHcountPeers(void){
 int MESHaddPeer(uint8_t *_MAC ){
   mesh_peer_t _newPeer;
   memcpy(_newPeer.MAC,_MAC,6);
-  _newPeer.lmfp = millis();
+  _newPeer.lastMessageFromPeer = millis();
 #ifdef ESP32
   _newPeer.topic[0] = 0;
 #endif

@@ -55,6 +55,7 @@ void CB_MESHDataReceived(const uint8_t *MAC, const uint8_t *packet, int len) {
   static bool _locked = false;
   if(_locked) return;
   _locked = true;
+  AddLog_P(LOG_LEVEL_DEBUG, PSTR("<<<"));
   MESH.lmfap = millis();
   MESHcheckPeerList((const uint8_t *)MAC);
   mesh_packet_t *_recvPacket = (mesh_packet_t*)packet;
@@ -67,13 +68,15 @@ void CB_MESHDataSent( uint8_t *MAC, uint8_t sendStatus) {
 
 void CB_MESHDataReceived(uint8_t *MAC, uint8_t *packet, uint8_t len) {
       MESH.lmfap = millis(); //any peer
-      if(memcmp(MAC,MESH.broker,6)==0) MESH.lmfb = millis(); //directly from the broker
+      if(memcmp(MAC,MESH.broker,6)==0) MESH.lastMessageFromBroker = millis(); //directly from the broker
       mesh_packet_t *_recvPacket = (mesh_packet_t*)packet;
       switch(_recvPacket->type){
         case PACKET_TYPE_TIME:
           Rtc.utc_time = _recvPacket->senderTime;
           Rtc.user_time_entry = true;
-          MESH.lmfb = millis();
+          MESH.lastMessageFromBroker = millis();
+          Wifi.retry = 0;
+          AddLog_P(LOG_LEVEL_DEBUG,PSTR("got Time"));
           break;
         case PACKET_TYPE_PEERLIST:
           MESH.packetToConsume.push(*_recvPacket);
@@ -297,6 +300,8 @@ void MESHstartNode(int32_t _channel){ //we need a running broker with a known ch
   wifi_set_channel(MESH.channel);
   wifi_promiscuous_enable(0);
   WiFi.disconnect();
+  Settings.flag4.network_wifi = 0; // the "old" wifi off command
+  TasmotaGlobal.global_state.wifi_down = 1;
   if (esp_now_init() != 0) {
     return;
   }
@@ -507,15 +512,24 @@ void MESHevery50MSecond(){
 
 
 void MESHEverySecond(){
-  // if (MESH.role > ROLE_BROKER){
+  if (MESH.role > ROLE_BROKER){
     if(MESH.flags.brokerNeedsTopic == 1){
+      AddLog_P(LOG_LEVEL_DEBUG, PSTR("broker wants topic"));
       MESHanounceTopic();
       MESH.flags.brokerNeedsTopic = 0;
     }
-    if(millis()-MESH.lmfb>31000){
+    if(millis()-MESH.lastMessageFromBroker>31000){
+      AddLog_P(LOG_LEVEL_DEBUG, PSTR("broker not seen for >30 secs"));
       MESHanounceTopic();
     }
-  // }
+    if(millis()-MESH.lastMessageFromBroker>70000){
+      AddLog_P(LOG_LEVEL_DEBUG, PSTR("broker not seen for 70 secs, try to re-launch wifi"));
+      MESH.role = ROLE_NONE;
+      Settings.flag4.network_wifi = 1; // the "old" wifi on command -> reconnect
+      TasmotaGlobal.global_state.wifi_down = 0;
+      WifiBegin(3, MESH.channel);
+    }
+  }
 }
 #endif //ESP8266
 
@@ -539,7 +553,7 @@ void MESHshow(bool json){
         char _MAC[18];
         ToHex_P(_peer.MAC,6,_MAC,18,':');
         WSContentSend_PD(PSTR("Node MAC: %s <br>"),_MAC);
-        WSContentSend_PD(PSTR("Node last message: %u msecs ago<br>"),millis()-_peer.lmfp);
+        WSContentSend_PD(PSTR("Node last message: %u msecs ago<br>"),millis()-_peer.lastMEssageFromPeer);
         WSContentSend_PD(PSTR("Node MQTT topic: %s <hr>"),_peer.topic);
       }
     }
