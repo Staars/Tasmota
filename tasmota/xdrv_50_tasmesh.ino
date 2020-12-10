@@ -75,7 +75,7 @@ void CB_MESHDataReceived(uint8_t *MAC, uint8_t *packet, uint8_t len) {
           Rtc.utc_time = _recvPacket->senderTime;
           Rtc.user_time_entry = true;
           MESH.lastMessageFromBroker = millis();
-          Wifi.retry = 0;
+          //Wifi.retry = 0;
           AddLog_P(LOG_LEVEL_DEBUG,PSTR("got Time"));
           break;
         case PACKET_TYPE_PEERLIST:
@@ -553,7 +553,7 @@ void MESHshow(bool json){
         char _MAC[18];
         ToHex_P(_peer.MAC,6,_MAC,18,':');
         WSContentSend_PD(PSTR("Node MAC: %s <br>"),_MAC);
-        WSContentSend_PD(PSTR("Node last message: %u msecs ago<br>"),millis()-_peer.lastMEssageFromPeer);
+        WSContentSend_PD(PSTR("Node last message: %u msecs ago<br>"),millis()-_peer.lastMessageFromPeer);
         WSContentSend_PD(PSTR("Node MQTT topic: %s <hr>"),_peer.topic);
       }
     }
@@ -591,6 +591,7 @@ bool MESHCmd(void) {
           AddLog_P(LOG_LEVEL_DEBUG,PSTR("channel: %u"), XdrvMailbox.payload);
           MESH.channel = XdrvMailbox.payload;
         }
+        Response_P(S_JSON_MESH_COMMAND_NVALUE, command, MESH.channel);
         break;
       case CMND_MESH_PEER:
         if (XdrvMailbox.data_len > 0) {
@@ -655,5 +656,3 @@ return result;
 }
 
 #endif  // USE_TASMESH
-
-
