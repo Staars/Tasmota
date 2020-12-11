@@ -48,22 +48,58 @@ const char kMESH_Commands[] PROGMEM             = "Broker|Node|Peer|Channel";
 #ifdef ESP32
 void CB_MESHDataSent(const uint8_t *MAC,  esp_now_send_status_t sendStatus);
 void CB_MESHDataSent(const uint8_t *MAC,  esp_now_send_status_t sendStatus) {
-  AddLog_P(LOG_LEVEL_DEBUG, PSTR(">>>"));
+  char _destMAC[18];
+  ToHex_P(MAC,6,_destMAC,18,':');
+  AddLog_P(LOG_LEVEL_DEBUG, PSTR(">>> %s"),_destMAC);
 }
 
 void CB_MESHDataReceived(const uint8_t *MAC, const uint8_t *packet, int len) {
   static bool _locked = false;
   if(_locked) return;
   _locked = true;
-  AddLog_P(LOG_LEVEL_DEBUG, PSTR("<<<"));
-  MESH.lmfap = millis();
-  MESHcheckPeerList((const uint8_t *)MAC);
+  char _srcMAC[18];
+  ToHex_P(MAC,6,_srcMAC,18,':');
+  AddLog_P(LOG_LEVEL_DEBUG, PSTR("<<< %s"),_srcMAC);
   mesh_packet_t *_recvPacket = (mesh_packet_t*)packet;
-  MESH.packetToConsume.push(*_recvPacket);
+  if(_recvPacket->type == PACKET_TYPE_REGISTER_NODE){
+    if(MESHcheckPeerList((const uint8_t *)MAC) == false){
+      MESHencryptPayload(_recvPacket,0); //decrypt it and check
+      if(memcmp(_recvPacket->payload,MESH.broker,6) == 0){
+        MESHaddPeer((uint8_t*)MAC);
+        AddLog_P(LOG_LEVEL_INFO, PSTR("MESH: received topic: %s"), (char*)_recvPacket->payload + 6);
+        // AddLogBuffer(LOG_LEVEL_INFO,(uint8_t *)&MESH.packetToConsume.front().payload,MESH.packetToConsume.front().chunkSize+5);
+        for(auto &_peer : MESH.peers){
+          if(memcmp(_peer.MAC,_recvPacket->sender,6)==0){
+            strcpy(_peer.topic,(char*)_recvPacket->payload + 6);
+            MESHsubscribe((char*)&_peer.topic);
+            _locked = false;
+            return;
+          }
+        }
+      }
+      else {
+        AddLog_P(LOG_LEVEL_DEBUG, PSTR("peer %s denied !!!"),_srcMAC);
+        char _cryptMAC[18];
+        ToHex_P(_recvPacket->payload,6,_cryptMAC,18,':');
+        AddLog_P(LOG_LEVEL_DEBUG, PSTR("wrong MAC: %s"),_cryptMAC);
+        _locked = false;
+        return;
+      }
+    }
+  }
+  MESH.lmfap = millis();
+  if (MESHcheckPeerList(MAC) == true){
+    AddLog_P(LOG_LEVEL_DEBUG, PSTR("packet from %s to queue"),_srcMAC);
+    MESH.packetToConsume.push(*_recvPacket);
+  }
   _locked = false;
 }
+
 #else //ESP8266
 void CB_MESHDataSent( uint8_t *MAC, uint8_t sendStatus) {
+  char _destMAC[18];
+  ToHex_P(MAC,6,_destMAC,18,':');
+  AddLog_P(LOG_LEVEL_DEBUG, PSTR(">>> %s"),_destMAC);
 }
 
 void CB_MESHDataReceived(uint8_t *MAC, uint8_t *packet, uint8_t len) {
@@ -273,16 +309,16 @@ bool MESHrouteMQTTtoMESH(const char* _topic, char* _data, bool _retained){
  * @brief The node sends its mqtt topic to the broker
  * 
  */
-void MESHanounceTopic(){
-  // memset(MESH.sendPacket.payload,0,MESH_PAYLOAD_SIZE);
-  memcpy(MESH.sendPacket.receiver,MESH.broker,6);
-  strcpy((char*)MESH.sendPacket.payload,TasmotaGlobal.mqtt_topic);
-  AddLog_P(LOG_LEVEL_DEBUG, PSTR("MESH: topic: %s"),(char*)MESH.sendPacket.payload);
+void MESHregisterNode(){
+  memcpy(MESH.sendPacket.receiver,MESH.broker,6); // first 6 bytes -> MAC of broker
+  strcpy((char*)MESH.sendPacket.payload+6,TasmotaGlobal.mqtt_topic); // remaining bytes -> topic of node
+  AddLog_P(LOG_LEVEL_DEBUG, PSTR("MESH: register node with topic: %s"),(char*)MESH.sendPacket.payload+6);
   MESH.sendPacket.TTL = 2;
   MESH.sendPacket.chunks = 1;
   MESH.sendPacket.chunk = 0;
-  MESH.sendPacket.chunkSize = strlen((char*)MESH.sendPacket.payload) + 1;
-  MESH.sendPacket.type = PACKET_TYPE_TOPIC;
+  MESH.sendPacket.chunkSize = strlen(TasmotaGlobal.mqtt_topic) + 1 + 6;
+  memcpy(MESH.sendPacket.payload,MESH.broker,6);
+  MESH.sendPacket.type = PACKET_TYPE_REGISTER_NODE;
   MESHsendPacket(&MESH.sendPacket);
   // int result = esp_now_send(MESH.sendPacket.receiver, (uint8_t *)&MESH.sendPacket, (sizeof(MESH.sendPacket))-(MESH_PAYLOAD_SIZE-MESH.sendPacket.chunkSize-1));
 }
@@ -319,7 +355,7 @@ void MESHstartNode(int32_t _channel){ //we need a running broker with a known ch
   MESHaddPeer(MESH.broker); //must always be peer 0!! -return code -7 for peer list full
   MESHcountPeers();
   MESH.role = ROLE_NODE_FULL;
-  MESHanounceTopic();
+  MESHregisterNode();
 #endif //ESP8266
 }
 
@@ -378,20 +414,20 @@ void MESHevery50MSecond(){
 
     MESHencryptPayload(&MESH.packetToConsume.front(),0);
     switch(MESH.packetToConsume.front().type){
-      case PACKET_TYPE_TOPIC:
-        AddLog_P(LOG_LEVEL_INFO, PSTR("MESH: received topic: %s"), (char*)MESH.packetToConsume.front().payload);
-        // AddLogBuffer(LOG_LEVEL_INFO,(uint8_t *)&MESH.packetToConsume.front().payload,MESH.packetToConsume.front().chunkSize+5);
-        for(auto &_peer : MESH.peers){
-          if(memcmp(_peer.MAC,MESH.packetToConsume.front().sender,6)==0){
-            strcpy(_peer.topic,(char*)MESH.packetToConsume.front().payload);
-            MESHsubscribe((char*)&_peer.topic);
-          }
-        }
-        break;
+      // case PACKET_TYPE_REGISTER_NODE:
+      //   AddLog_P(LOG_LEVEL_INFO, PSTR("MESH: received topic: %s"), (char*)MESH.packetToConsume.front().payload + 6);
+      //   // AddLogBuffer(LOG_LEVEL_INFO,(uint8_t *)&MESH.packetToConsume.front().payload,MESH.packetToConsume.front().chunkSize+5);
+      //   for(auto &_peer : MESH.peers){
+      //     if(memcmp(_peer.MAC,MESH.packetToConsume.front().sender,6)==0){
+      //       strcpy(_peer.topic,(char*)MESH.packetToConsume.front().payload+6);
+      //       MESHsubscribe((char*)&_peer.topic);
+      //     }
+      //   }
+      //   break;
       case PACKET_TYPE_PEERLIST:
         for(uint32_t i=0;i<MESH.packetToConsume.front().chunkSize;i+=6){
           if(memcmp(MESH.packetToConsume.front().payload+i,MESH.sendPacket.sender,6)==0) continue; //do not add myself
-          MESHcheckPeerList(MESH.packetToConsume.front().payload+i);
+          if(MESHcheckPeerList(MESH.packetToConsume.front().payload+i) == false) MESHaddPeer(MESH.packetToConsume.front().payload+i);
         }
         break;
       case  PACKET_TYPE_MQTT: // redirected MQTT from node in packet [char* _space_ char*]
@@ -500,7 +536,7 @@ void MESHevery50MSecond(){
       case PACKET_TYPE_PEERLIST:
         for(uint32_t i=0;i<MESH.packetToConsume.front().chunkSize;i+=6){
           if(memcmp(MESH.packetToConsume.front().payload+i,MESH.sendPacket.sender,6)==0) continue; //do not add myself
-          MESHcheckPeerList(MESH.packetToConsume.front().payload+i);
+          if(MESHcheckPeerList(MESH.packetToConsume.front().payload+i) == false) MESHaddPeer(MESH.packetToConsume.front().payload+i);
         }
         break;
       default:
@@ -515,12 +551,12 @@ void MESHEverySecond(){
   if (MESH.role > ROLE_BROKER){
     if(MESH.flags.brokerNeedsTopic == 1){
       AddLog_P(LOG_LEVEL_DEBUG, PSTR("broker wants topic"));
-      MESHanounceTopic();
+      MESHregisterNode();
       MESH.flags.brokerNeedsTopic = 0;
     }
     if(millis()-MESH.lastMessageFromBroker>31000){
       AddLog_P(LOG_LEVEL_DEBUG, PSTR("broker not seen for >30 secs"));
-      MESHanounceTopic();
+      MESHregisterNode();
     }
     if(millis()-MESH.lastMessageFromBroker>70000){
       AddLog_P(LOG_LEVEL_DEBUG, PSTR("broker not seen for 70 secs, try to re-launch wifi"));

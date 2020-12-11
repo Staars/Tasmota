@@ -153,8 +153,8 @@ enum MESH_Packet_Type {                         // Type of packet
   PACKET_TYPE_TIME = 0,                         // 
   PACKET_TYPE_PEERLIST,                         // send all kown peers, broker is always 0
   PACKET_TYPE_COMMAND,                          // not used yet
-  PACKET_TYPE_TOPIC,                            // announce mqtt topic to ESP32-proxy
-  PACKET_TYPE_MQTT,                             //
+  PACKET_TYPE_REGISTER_NODE,                    // register a node with encrypted broker-MAC, announce mqtt topic to ESP32-proxy
+  PACKET_TYPE_MQTT,                             // send regular mqtt messages, single or multipackets
   PACKET_TYPE_WANTTOPIC                         // the broker has no topic for this peer/node
 }; 
 
@@ -210,16 +210,15 @@ void MESHsendPeerList(void){ //we send this list only to the peers, that can dir
   MESHsendPacket(&MESH.sendPacket);
 }
 
-void MESHcheckPeerList(const uint8_t *MAC){
+bool MESHcheckPeerList(const uint8_t *MAC){
+  bool success = false;
   for(auto &_peer : MESH.peers){
     if(memcmp(_peer.MAC,MAC,6)==0){
       _peer.lastMessageFromPeer = millis();
-      return;
+      return true;
     }
   }
-  MESHaddPeer((uint8_t *)MAC);
-  Response_P(PSTR("{\"%s\":{\"Peers\":%u}}"), D_CMND_MESH, MESH.peers.size());
-  XdrvRulesProcess();
+  return false;
 }
 
 uint8_t MESHcountPeers(void){
@@ -262,6 +261,8 @@ int MESHaddPeer(uint8_t *_MAC ){
 #ifdef ESP32
   if(MESH.role == ROLE_BROKER) MESHsendTime();
 #endif //ESP32
+  Response_P(PSTR("{\"%s\":{\"Peers\":%u}}"), D_CMND_MESH, MESH.peers.size());
+  XdrvRulesProcess();
   return err;
   }
   else{
