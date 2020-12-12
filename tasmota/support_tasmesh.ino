@@ -150,16 +150,16 @@ enum MESH_Role {
 };
 
 enum MESH_Packet_Type {                         // Type of packet
-  PACKET_TYPE_TIME = 0,                         // 
+  PACKET_TYPE_TIME = 0,                         //
   PACKET_TYPE_PEERLIST,                         // send all kown peers, broker is always 0
   PACKET_TYPE_COMMAND,                          // not used yet
   PACKET_TYPE_REGISTER_NODE,                    // register a node with encrypted broker-MAC, announce mqtt topic to ESP32-proxy
   PACKET_TYPE_MQTT,                             // send regular mqtt messages, single or multipackets
   PACKET_TYPE_WANTTOPIC                         // the broker has no topic for this peer/node
-}; 
+};
 
 /*********************************************************************************************\
- * 
+ *
 \*********************************************************************************************/
 #ifdef ESP32
 void MESHsendTime(){ //only from broker to nodes

@@ -171,7 +171,7 @@ void MESHInit(void) {
 #ifdef ESP32
 /**
  * @brief Subscribes as a proxy
- * 
+ *
  * @param topic - received from the referring node
  */
 void MESHsubscribe(char *topic){
@@ -186,7 +186,7 @@ void MESHunsubscribe(char *topic){
   MqttUnsubscribe(stopic);
 }
 
-void MESHconnectMQTT(void){ 
+void MESHconnectMQTT(void){
   for(auto &_peer : MESH.peers){
     AddLog_P(LOG_LEVEL_INFO, PSTR("MESH: reconnect topic: %s"),_peer.topic);
     if(_peer.topic[0]!=0){
@@ -196,14 +196,14 @@ void MESHconnectMQTT(void){
 }
 
 /**
- * @brief Intercepts mqtt message, that the broker (ESP32) subscribes to as a proxy for a node. 
+ * @brief Intercepts mqtt message, that the broker (ESP32) subscribes to as a proxy for a node.
  *        Is called from xdrv_02_mqtt.ino. Will send the message in the payload via ESP-NOW.
- * 
- * @param _topic 
- * @param _data 
- * @param data_len 
- * @return true 
- * @return false 
+ *
+ * @param _topic
+ * @param _data
+ * @param data_len
+ * @return true
+ * @return false
  */
 bool MESHinterceptMQTTonBroker(char* _topic, uint8_t* _data, unsigned int data_len){
   char stopic[TOPSZ];
@@ -247,12 +247,12 @@ void MESHreceiveMQTT(mesh_packet_t *_packet){
 /**
  * @brief Redirects the mqtt message on the node just before it would have been sended to 
  *        the broker via ESP-NOW
- * 
- * @param _topic 
- * @param _data 
+ *
+ * @param _topic
+ * @param _data
  * @param _retained - currently unused
- * @return true 
- * @return false 
+ * @return true
+ * @return false
  */
 bool MESHrouteMQTTtoMESH(const char* _topic, char* _data, bool _retained){
   size_t _bytesLeft = strlen(_topic)+strlen(_data)+2;
@@ -307,7 +307,7 @@ bool MESHrouteMQTTtoMESH(const char* _topic, char* _data, bool _retained){
 
 /**
  * @brief The node sends its mqtt topic to the broker
- * 
+ *
  */
 void MESHregisterNode(){
   memcpy(MESH.sendPacket.receiver,MESH.broker,6); // first 6 bytes -> MAC of broker
@@ -612,6 +612,7 @@ bool MESHCmd(void) {
 
     switch (command_code) {
       case CMND_MESH_BROKER:
+        MESH.channel = WiFi.channel(); // Broker gets the channel from the router, no need to declare it with MESHCHANNEL
         MESHstartBroker();
         Response_P(S_JSON_MESH_COMMAND_NVALUE, command, MESH.channel);
         break;
@@ -661,6 +662,12 @@ bool Xdrv50(uint8_t function)
   switch (function) {
     case FUNC_PRE_INIT:
       MESHInit();                              // TODO: save state
+      break;
+    case FUNC_INIT:
+#ifdef ESP8266
+      Settings.flag4.network_wifi = 1;
+      TasmotaGlobal.global_state.wifi_down = 0;
+#endif //ESP8266
       break;
     case FUNC_EVERY_50_MSECOND:
       MESHevery50MSecond();
