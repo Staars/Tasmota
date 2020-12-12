@@ -612,7 +612,7 @@ bool MESHCmd(void) {
 
     switch (command_code) {
       case CMND_MESH_BROKER:
-        MESH.channel = WiFi.channel(); // Broker get the channel from the router, no need to declare it with MESHCHANNEL
+        MESH.channel = WiFi.channel(); // Broker gets the channel from the router, no need to declare it with MESHCHANNEL
         MESHstartBroker();
         Response_P(S_JSON_MESH_COMMAND_NVALUE, command, MESH.channel);
         break;
@@ -662,6 +662,12 @@ bool Xdrv50(uint8_t function)
   switch (function) {
     case FUNC_PRE_INIT:
       MESHInit();                              // TODO: save state
+      break;
+    case FUNC_INIT:
+#ifdef ESP8266
+      Settings.flag4.network_wifi = 1;
+      TasmotaGlobal.global_state.wifi_down = 0;
+#endif //ESP8266
       break;
     case FUNC_EVERY_50_MSECOND:
       MESHevery50MSecond();
