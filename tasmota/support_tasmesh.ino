@@ -94,8 +94,9 @@ struct mesh_peer_t{
 #endif //ESP32
 };
 
-struct mesh_broker_flags_t{
+struct mesh_flags_t{
   uint8_t brokerNeedsTopic:1;
+  uint8_t nodeGotTime:1;
 };
 
 struct mesh_packet_combined_t{
@@ -115,7 +116,7 @@ struct{
   uint32_t lastMessageFromBroker;    //time of last message from broker
   uint32_t lmfap;   //time of last message from any peer
   uint8_t key[32];
-  mesh_broker_flags_t flags;
+  mesh_flags_t flags;
   mesh_packet_t sendPacket;
   std::vector<mesh_peer_t> peers;
   std::queue<mesh_packet_t> packetToResend;
@@ -169,7 +170,7 @@ void MESHsendTime(){ //only from broker to nodes
   // memcpy(MESH.sendPacket.receiver,MESH.peers[_peerNumber].MAC,6);
   MESH.sendPacket.senderTime = Rtc.utc_time;
   MESH.sendPacket.payload[0] = 0;
-  // mesh_broker_flags_t *_flags = (mesh_broker_flags_t *)MESH.sendPacket.payload;
+  // mesh_flags_t *_flags = (mesh_flags_t *)MESH.sendPacket.payload;
   // if(MESH.peers[_peerNumber].topic[0]==0){
   //   AddLog_P(LOG_LEVEL_INFO, PSTR("MESH: broker wants topic from peer: %u"), _peerNumber);
   //   _flags->brokerNeedsTopic = 1;

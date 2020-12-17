@@ -86,6 +86,9 @@ void CB_MESHDataReceived(const uint8_t *MAC, const uint8_t *packet, int len) {
         return;
       }
     }
+    else {
+      MESH.flags.nodeWantsTime = 1;
+    }
   }
   MESH.lmfap = millis();
   if (MESHcheckPeerList(MAC) == true){
@@ -111,8 +114,14 @@ void CB_MESHDataReceived(uint8_t *MAC, uint8_t *packet, uint8_t len) {
           Rtc.utc_time = _recvPacket->senderTime;
           Rtc.user_time_entry = true;
           MESH.lastMessageFromBroker = millis();
+          if(MESH.flags.nodeGotTime == 0){
+            RtcSync();
+            TasmotaGlobal.rules_flag.system_boot  = 1; // for now we consider the node booted and let trigger system#boot on RULES
+          }
+          MESH.flags.nodeGotTime = 1;
           //Wifi.retry = 0;
-          AddLog_P(LOG_LEVEL_DEBUG,PSTR("got Time"));
+          // Response_P(PSTR("{\"%s\":{\"Time\":1}}"), D_CMND_MESH); //got the time, now we can publish some sensor data
+          // XdrvRulesProcess();
           break;
         case PACKET_TYPE_PEERLIST:
           MESH.packetToConsume.push(*_recvPacket);
@@ -163,6 +172,14 @@ void MESHInit(void) {
   MESH.sendPacket.chunk = 0;
   MESH.sendPacket.type = PACKET_TYPE_TIME;
   MESH.sendPacket.TTL = 2;
+}
+
+void MESHdeInit(){
+#ifdef ESP8266 // only ESP8266, ESP32 as a broker should not use deepsleep
+  AddLog_P(LOG_LEVEL_INFO, PSTR("MESH: stopping"));
+  // TODO: degister from the broker, so he can stop MQTT-proxy
+  esp_now_deinit();
+#endif //ESP8266
 }
 
 /*********************************************************************************************\
@@ -488,12 +505,14 @@ void MESHEverySecond(){
   static uint32_t _second = 0;
   _second++;
   // send a time packet every x seconds
-  uint32_t _peerNumber = _second%30;
-  if(_second%30==0) {
-    MESHsendTime();
-    return;
+  if(_second%5==0) {
+    if(MESH.flags.nodeWantsTime == 1 || _second%30==0){ //every 5 seconds on demand or every 30 seconds anyway
+      MESHsendTime();
+      MESH.flags.nodeWantsTime = 0;
+      return;
+    }
   }
-  _peerNumber = _second%45;
+  uint32_t _peerNumber = _second%45;
   if(_peerNumber<MESH.peers.size()) {
     if(MESH.peers[_peerNumber].topic[0]==0){
       AddLog_P(LOG_LEVEL_INFO, PSTR("MESH: broker wants topic from peer: %u"), _peerNumber);
@@ -694,6 +713,11 @@ bool Xdrv50(uint8_t function)
     case FUNC_SHOW_SENSOR:
       MESHsendPeerList(); // we sync this to the Teleperiod with a delay
       break;
+#ifdef USE_DEEPSLEEP
+      case FUNC_SAVE_BEFORE_RESTART:
+        MESHdeInit();
+        break;
+#endif // USE_DEEPSLEEP
   }
 return result;
 }
