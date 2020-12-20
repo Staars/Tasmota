@@ -467,7 +467,7 @@ void MESHevery50MSecond(){
             if(_packet_combined.receivedChunks==_temp){
               char * _data = (char*)_packet_combined.raw + strlen((char*)_packet_combined.raw) + 1;
               MqttClient.publish((char*)_packet_combined.raw, _data);
-              // AddLog_P(LOG_LEVEL_INFO, PSTR("MESH: combined done: %s = %s"),(char*)_packet_combined.raw,_data);
+              AddLog_P(LOG_LEVEL_INFO, PSTR("MESH: combined done: %s = %s"),(char*)_packet_combined.raw,_data);
               // AddLogBuffer(LOG_LEVEL_INFO,(uint8_t*)_packet_combined.raw,50);
             }
           }
@@ -487,7 +487,16 @@ void MESHevery50MSecond(){
         // if (MESH.packetToConsume.front().chunk==0) AddLogBuffer(LOG_LEVEL_INFO,(uint8_t *)&MESH.packetToConsume.front().payload,MESH.packetToConsume.front().chunkSize);
         char * _data = (char*)MESH.packetToConsume.front().payload + strlen((char*)MESH.packetToConsume.front().payload)+1;
         MqttClient.publish((char*)MESH.packetToConsume.front().payload, _data);
-        // AddLog_P(LOG_LEVEL_INFO, PSTR("MESH: topic: %s output: %s"), (char*)MESH.packetToConsume.front().payload, _data);
+        AddLog_P(LOG_LEVEL_INFO, PSTR("MESH: topic: %s output: %s"), (char*)MESH.packetToConsume.front().payload, _data);
+        uint32_t idx = 0;
+        for(auto &_peer : MESH.peers){
+          if(memcmp(_peer.MAC,MESH.packetToConsume.front().sender,6)==0){
+            _peer.lastMessageFromPeer = millis();
+            MESH.lastTeleMsgs[idx]  = std::string(_data);
+            break;
+          }
+          idx++;
+        }
         // AddLogBuffer(LOG_LEVEL_INFO,(uint8_t *)&MESH.packetToConsume.front().payload,MESH.packetToConsume.front().chunkSize);
         yield();  // #3313
         }
@@ -617,7 +626,17 @@ void MESHshow(bool json){
           JsonParser parser(json_buffer);
           JsonParserObject root = parser.getRootObject();
           for (auto key : root) {
-            WSContentSend_PD(PSTR("Tele: %s %s<br>"),key.getStr(), key.getValue().getStr());
+            JsonParserObject subObj = key.getValue().getObject();
+            if(subObj){
+              WSContentSend_PD(PSTR("<ul>%s:"),key.getStr());
+              for (auto subkey : subObj) {
+                WSContentSend_PD(PSTR("<ul>%s: %s</ul>"),subkey.getStr(), subkey.getValue().getStr());
+              }
+              WSContentSend_PD(PSTR("</ul>"));
+            }
+            else{
+              WSContentSend_PD(PSTR("<ul>%s: %s</ul>"),key.getStr(), key.getValue().getStr());
+            }
           }
           // AddLog_P(LOG_LEVEL_INFO,PSTR("teleJSON: %s"),(char*)MESH.lastTeleMsgs[idx].c_str());
           // AddLog_P(LOG_LEVEL_INFO,PSTR("stringsize: %u"),MESH.lastTeleMsgs[idx].length());
