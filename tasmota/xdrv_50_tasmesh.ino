@@ -604,18 +604,34 @@ void MESHshow(bool json){
       WSContentSend_PD(PSTR("TAS-MESH:<br>"));
       WSContentSend_PD(PSTR("Broker MAC: %s <br>"),WiFi.softAPmacAddress().c_str());
       WSContentSend_PD(PSTR("Broker Channel: %u <hr>"),WiFi.channel());
+      uint32_t idx = 0;
       for(auto &_peer : MESH.peers){
         char _MAC[18];
         ToHex_P(_peer.MAC,6,_MAC,18,':');
         WSContentSend_PD(PSTR("Node MAC: %s <br>"),_MAC);
         WSContentSend_PD(PSTR("Node last message: %u msecs ago<br>"),millis()-_peer.lastMessageFromPeer);
-        WSContentSend_PD(PSTR("Node MQTT topic: %s <hr>"),_peer.topic);
+        WSContentSend_PD(PSTR("Node MQTT topic: %s <br>"),_peer.topic);
+        if(MESH.lastTeleMsgs.size()>idx){
+          char json_buffer[MESH.lastTeleMsgs[idx].length()+1];
+          strcpy(json_buffer,(char*)MESH.lastTeleMsgs[idx].c_str());
+          JsonParser parser(json_buffer);
+          JsonParserObject root = parser.getRootObject();
+          for (auto key : root) {
+            WSContentSend_PD(PSTR("Tele: %s %s<br>"),key.getStr(), key.getValue().getStr());
+          }
+          // AddLog_P(LOG_LEVEL_INFO,PSTR("teleJSON: %s"),(char*)MESH.lastTeleMsgs[idx].c_str());
+          // AddLog_P(LOG_LEVEL_INFO,PSTR("stringsize: %u"),MESH.lastTeleMsgs[idx].length());
+        }
+        else {
+          // AddLog_P(LOG_LEVEL_INFO,PSTR("telemsgSize: %u"),MESH.lastTeleMsgs.size());
+        }
+        WSContentSend_PD(PSTR("<hr>"));
+        idx++;
       }
     }
 #endif //ESP32
   }
 }
-
 
 /*********************************************************************************************\
  * check the MESH commands

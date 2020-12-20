@@ -97,6 +97,7 @@ struct mesh_peer_t{
 struct mesh_flags_t{
   uint8_t brokerNeedsTopic:1;
   uint8_t nodeGotTime:1;
+  uint8_t nodeWantsTime:1;
 };
 
 struct mesh_packet_combined_t{
@@ -124,6 +125,9 @@ struct{
   std::vector<mesh_packet_header_t> packetsAlreadySended;
   std::vector<mesh_first_header_bytes> packetsAlreadyReceived;
   std::vector<mesh_packet_combined_t> multiPackets;
+#ifdef ESP32
+  std::vector<std::string> lastTeleMsgs;
+#endif //ESP32
 }MESH;
 
 /*********************************************************************************************\
@@ -245,6 +249,10 @@ int MESHaddPeer(uint8_t *_MAC ){
   _newPeer.topic[0] = 0;
 #endif
   MESH.peers.push_back(_newPeer);
+#ifdef ESP32
+  std::string _msg = "{\"Init\":1}"; // init with a simple JSON only while developing
+  MESH.lastTeleMsgs.push_back(_msg); // we must keep this vector in sync with the peers-struct on the broker regarding the indices 
+#endif //ESP32
   int err;
 #ifdef ESP32
   esp_now_peer_info_t _peer;
