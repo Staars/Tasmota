@@ -602,13 +602,23 @@ void MESHEverySecond(){
 \*********************************************************************************************/
 void MESHshow(bool json){
   if (json) {
-  if(MESH.role != ROLE_NONE){
-    if(MESH.role != ROLE_BROKER) ResponseAppend_P(PSTR(",\"MESH\":{\"broker\":%u"),MESH.channel);
-    else ResponseAppend_P(PSTR(",\"MESH\":{\"node\":%u"),MESH.channel);
+  if(MESH.role == ROLE_BROKER){
+    ResponseAppend_P(PSTR(",\"MESH\":{\"channel\":%u"),MESH.channel);
+    ResponseAppend_P(PSTR(",\"nodes\":%u"),MESH.peers.size());
+    if(MESH.peers.size()>0){
+      ResponseAppend_P(PSTR(",\"MAC\":["));
+      for(auto &_peer : MESH.peers){
+        char _MAC[18];
+        ToHex_P(_peer.MAC,6,_MAC,18,':');
+        ResponseAppend_P(PSTR("\"%s\","),_MAC);
+      }
+      TasmotaGlobal.mqtt_data[strlen(TasmotaGlobal.mqtt_data)-1] = 0; // delete last ','
+      ResponseAppend_P(PSTR("]"));
+    }
     ResponseJsonEnd();
     }
   } else {
-#ifdef ESP32
+#ifdef ESP32 //web UI only on the the broker = ESP32
     if(MESH.role == ROLE_BROKER){
       WSContentSend_PD(PSTR("TAS-MESH:<br>"));
       WSContentSend_PD(PSTR("Broker MAC: %s <br>"),WiFi.softAPmacAddress().c_str());
