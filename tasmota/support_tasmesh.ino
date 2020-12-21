@@ -98,6 +98,7 @@ struct mesh_flags_t{
   uint8_t brokerNeedsTopic:1;
   uint8_t nodeGotTime:1;
   uint8_t nodeWantsTime:1;
+  uint8_t nodeWantsTimeASAP:1;
 };
 
 struct mesh_packet_combined_t{
@@ -158,7 +159,8 @@ enum MESH_Packet_Type {                         // Type of packet
   PACKET_TYPE_TIME = 0,                         //
   PACKET_TYPE_PEERLIST,                         // send all kown peers, broker is always 0
   PACKET_TYPE_COMMAND,                          // not used yet
-  PACKET_TYPE_REGISTER_NODE,                    // register a node with encrypted broker-MAC, announce mqtt topic to ESP32-proxy
+  PACKET_TYPE_REGISTER_NODE,                    // register a node with encrypted broker-MAC, announce mqtt topic to ESP32-proxy - broker will send time ASAP
+  PACKET_TYPE_REFRESH_NODE,                     // refresh node infos with encrypted broker-MAC, announce mqtt topic to ESP32-proxy - broker will send time slightly delayed
   PACKET_TYPE_MQTT,                             // send regular mqtt messages, single or multipackets
   PACKET_TYPE_WANTTOPIC                         // the broker has no topic for this peer/node
 };

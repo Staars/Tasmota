@@ -61,7 +61,7 @@ void CB_MESHDataReceived(const uint8_t *MAC, const uint8_t *packet, int len) {
   ToHex_P(MAC,6,_srcMAC,18,':');
   AddLog_P(LOG_LEVEL_DEBUG, PSTR("<<< %s"),_srcMAC);
   mesh_packet_t *_recvPacket = (mesh_packet_t*)packet;
-  if(_recvPacket->type == PACKET_TYPE_REGISTER_NODE){
+  if(_recvPacket->type == PACKET_TYPE_REGISTER_NODE || _recvPacket->type == PACKET_TYPE_REFRESH_NODE ){
     if(MESHcheckPeerList((const uint8_t *)MAC) == false){
       MESHencryptPayload(_recvPacket,0); //decrypt it and check
       if(memcmp(_recvPacket->payload,MESH.broker,6) == 0){
@@ -87,7 +87,10 @@ void CB_MESHDataReceived(const uint8_t *MAC, const uint8_t *packet, int len) {
       }
     }
     else {
-      MESH.flags.nodeWantsTime = 1;
+      if(_recvPacket->type == PACKET_TYPE_REGISTER_NODE){
+        MESH.flags.nodeWantsTimeASAP = 1; //this could happen after wake from deepsleep on battery powered device
+      }
+      else MESH.flags.nodeWantsTime = 1;
     }
   }
   MESH.lmfap = millis();
@@ -132,6 +135,7 @@ void CB_MESHDataReceived(uint8_t *MAC, uint8_t *packet, uint8_t len) {
           break;
       }
       if(memcmp(_recvPacket->receiver,MESH.sendPacket.sender,6)!=0){ //MESH.sendPacket.sender simply stores the MAC of the node
+        if(MESH.role == ROLE_NODE_SMALL) return; // a 'small node' does not perform mesh functions
         AddLog_P(LOG_LEVEL_DEBUG, PSTR("packet to resend ..."));
         MESH.packetToResend.push(*_recvPacket);
         return;
@@ -326,7 +330,7 @@ bool MESHrouteMQTTtoMESH(const char* _topic, char* _data, bool _retained){
  * @brief The node sends its mqtt topic to the broker
  *
  */
-void MESHregisterNode(){
+void MESHregisterNode(uint8_t mode){
   memcpy(MESH.sendPacket.receiver,MESH.broker,6); // first 6 bytes -> MAC of broker
   strcpy((char*)MESH.sendPacket.payload+6,TasmotaGlobal.mqtt_topic); // remaining bytes -> topic of node
   AddLog_P(LOG_LEVEL_DEBUG, PSTR("MESH: register node with topic: %s"),(char*)MESH.sendPacket.payload+6);
@@ -335,6 +339,8 @@ void MESHregisterNode(){
   MESH.sendPacket.chunk = 0;
   MESH.sendPacket.chunkSize = strlen(TasmotaGlobal.mqtt_topic) + 1 + 6;
   memcpy(MESH.sendPacket.payload,MESH.broker,6);
+  if(mode==0) MESH.sendPacket.type = PACKET_TYPE_REGISTER_NODE;
+  else MESH.sendPacket.type = PACKET_TYPE_REFRESH_NODE;
   MESH.sendPacket.type = PACKET_TYPE_REGISTER_NODE;
   MESHsendPacket(&MESH.sendPacket);
   // int result = esp_now_send(MESH.sendPacket.receiver, (uint8_t *)&MESH.sendPacket, (sizeof(MESH.sendPacket))-(MESH_PAYLOAD_SIZE-MESH.sendPacket.chunkSize-1));
@@ -344,7 +350,7 @@ void MESHregisterNode(){
  * generic functions
 \*********************************************************************************************/
 
-void MESHstartNode(int32_t _channel){ //we need a running broker with a known channel at that moment
+void MESHstartNode(int32_t _channel, uint8_t _role){ //we need a running broker with a known channel at that moment
 #ifdef ESP8266 // for now only ESP8266, might be added for the ESP32 later
   MESH.channel = _channel;
   WiFi.mode(WIFI_STA);
@@ -359,7 +365,7 @@ void MESHstartNode(int32_t _channel){ //we need a running broker with a known ch
     return;
   }
   // AddLog_P(LOG_LEVEL_INFO, PSTR("MESH: Node initialized, channel: %u"),wifi_get_channel()); //check if we succesfully set the
-  Response_P(PSTR("{\"%s\":{\"Node\":1,\"Channel\":%u}}"), D_CMND_MESH, wifi_get_channel());
+  Response_P(PSTR("{\"%s\":{\"Node\":1,\"Channel\":%u,\"Role\":%u}}"), D_CMND_MESH, wifi_get_channel(), _role);
   XdrvRulesProcess();
 
   esp_now_set_self_role(ESP_NOW_ROLE_COMBO);
@@ -371,8 +377,13 @@ void MESHstartNode(int32_t _channel){ //we need a running broker with a known ch
   WiFi.macAddress(MESH.sendPacket.sender);
   MESHaddPeer(MESH.broker); //must always be peer 0!! -return code -7 for peer list full
   MESHcountPeers();
-  MESH.role = ROLE_NODE_FULL;
-  MESHregisterNode();
+  if(_role == 0){
+    MESH.role = ROLE_NODE_SMALL;
+  }
+  else {
+    MESH.role = ROLE_NODE_FULL;
+  }
+  MESHregisterNode(0);
 #endif //ESP8266
 }
 
@@ -514,6 +525,11 @@ void MESHEverySecond(){
   static uint32_t _second = 0;
   _second++;
   // send a time packet every x seconds
+  if (MESH.flags.nodeWantsTimeASAP){
+    MESHsendTime();
+    MESH.flags.nodeWantsTimeASAP = 0;
+    return;
+  }
   if(_second%5==0) {
     if(MESH.flags.nodeWantsTime == 1 || _second%30==0){ //every 5 seconds on demand or every 30 seconds anyway
       MESHsendTime();
@@ -579,12 +595,12 @@ void MESHEverySecond(){
   if (MESH.role > ROLE_BROKER){
     if(MESH.flags.brokerNeedsTopic == 1){
       AddLog_P(LOG_LEVEL_DEBUG, PSTR("broker wants topic"));
-      MESHregisterNode();
+      MESHregisterNode(1); //refresh info
       MESH.flags.brokerNeedsTopic = 0;
     }
     if(millis()-MESH.lastMessageFromBroker>31000){
       AddLog_P(LOG_LEVEL_DEBUG, PSTR("broker not seen for >30 secs"));
-      MESHregisterNode();
+      MESHregisterNode(1); //refresh info
     }
     if(millis()-MESH.lastMessageFromBroker>70000){
       AddLog_P(LOG_LEVEL_DEBUG, PSTR("broker not seen for 70 secs, try to re-launch wifi"));
@@ -683,7 +699,8 @@ bool MESHCmd(void) {
       case CMND_MESH_NODE:
         if (XdrvMailbox.data_len > 0) {
           MESHHexStringToBytes(XdrvMailbox.data,MESH.broker);
-          MESHstartNode(MESH.channel);
+          if(XdrvMailbox.index!=0) XdrvMailbox.index = 1; //everything not 0 is a full node
+          MESHstartNode(MESH.channel,XdrvMailbox.index);
           Response_P(S_JSON_MESH_COMMAND_NVALUE, command, MESH.channel);
         }
         break;
