@@ -252,6 +252,16 @@ extern "C" {
     be_raise(vm, kTypeError, nullptr);
   }
 
+  extern void* berryColorCB;
+  extern uint8_t* berryColorBuffer;
+  extern void BerryVirtualLightInit();
+  void l_berry_cb(void* function, uint8_t* buffer);
+  void l_berry_cb(void* function, uint8_t* buffer){
+      berryColorCB = function;
+      berryColorBuffer = buffer;
+      LightModuleInit();
+  }
+
   int l_gamma8(bvm *vm);
   int l_gamma8(bvm *vm) {
     int32_t argc = be_top(vm); // Get the number of arguments
