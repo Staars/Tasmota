@@ -25,6 +25,8 @@ i2s_chan_handle_t rx_handle = nullptr;
 
 uint32_t SpeakerMic(uint8_t spkr) {
   esp_err_t err = ESP_OK;
+  i2s_slot_mode_t slot_mode = (audio_i2s.Settings->rx.slot_mode == 0) ? I2S_SLOT_MODE_MONO : I2S_SLOT_MODE_STEREO;
+
   if(rx_handle == nullptr){
     i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_AUTO, I2S_ROLE_MASTER);
     err = i2s_new_channel(&chan_cfg, NULL, &rx_handle);
@@ -34,7 +36,7 @@ uint32_t SpeakerMic(uint8_t spkr) {
           i2s_pdm_rx_config_t pdm_rx_cfg = {
           .clk_cfg = I2S_PDM_RX_CLK_DEFAULT_CONFIG(audio_i2s.Settings->rx.sample_rate),
           /* The default mono slot is the left slot (whose 'select pin' of the PDM microphone is pulled down) */
-          .slot_cfg = I2S_PDM_RX_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_MONO),
+          .slot_cfg = I2S_PDM_RX_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT, slot_mode),
           .gpio_cfg = {
               .clk = (gpio_num_t)Pin(GPIO_I2S_WS), //legacy setting
               .din = (gpio_num_t)Pin(GPIO_I2S_DIN),
@@ -43,14 +45,15 @@ uint32_t SpeakerMic(uint8_t spkr) {
               },
           },
         };
-        pdm_rx_cfg.slot_cfg.slot_mask = I2S_PDM_SLOT_RIGHT;
+        pdm_rx_cfg.slot_cfg.slot_mask = (i2s_pdm_slot_mask_t)audio_i2s.Settings->rx.slot_mask;
         err = i2s_channel_init_pdm_rx_mode(rx_handle, &pdm_rx_cfg);}
+        AddLog(LOG_LEVEL_DEBUG, PSTR("I2S: RX channel in PDM mode with 16 bit width on %i channels initialized"),slot_mode);
         break;
       default: // same as 0
           {        
           i2s_std_config_t rx_std_cfg = {
           .clk_cfg  = I2S_STD_CLK_DEFAULT_CONFIG(audio_i2s.Settings->rx.sample_rate),
-          .slot_cfg = I2S_STD_MSB_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_MONO),
+          .slot_cfg = I2S_STD_MSB_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT, slot_mode),
           .gpio_cfg = {
               .mclk = (gpio_num_t)Pin(GPIO_I2S_MCLK),
               .bclk = (gpio_num_t)Pin(GPIO_I2S_BCLK),
@@ -64,13 +67,14 @@ uint32_t SpeakerMic(uint8_t spkr) {
                   },
               },
           };
-          rx_std_cfg.slot_cfg.slot_mask = I2S_STD_SLOT_LEFT;
+          rx_std_cfg.slot_cfg.slot_mask = (i2s_std_slot_mask_t)audio_i2s.Settings->rx.slot_mask;
           i2s_channel_init_std_mode(rx_handle, &rx_std_cfg);}
+          AddLog(LOG_LEVEL_DEBUG, PSTR("I2S: RX channel in standard mode with 16 bit width on %i channels initialized"),slot_mode);
       break;
     }
     err = i2s_channel_enable(rx_handle);
   }
-  audio_i2s.mode = spkr;
+
   return err;
 }
 
@@ -115,14 +119,14 @@ void mic_task(void *arg){
 
   shine_set_config_mpeg_defaults(&config.mpeg);
 
-  if (audio_i2s.Settings->rx.slot_type == 0) {
+  if (audio_i2s.Settings->rx.slot_mode == 0) {
     config.mpeg.mode = MONO;
   } else {
     config.mpeg.mode = STEREO;
   }
   config.mpeg.bitr = 128;
   config.wave.samplerate = audio_i2s.Settings->rx.sample_rate;
-  config.wave.channels = (channels)(audio_i2s.Settings->rx.slot_type + 1);
+  config.wave.channels = (channels)(audio_i2s.Settings->rx.slot_mode + 1);
 
   if (shine_check_config(config.wave.samplerate, config.mpeg.bitr) < 0) {
     error = 3;
@@ -136,7 +140,7 @@ void mic_task(void *arg){
   }
 
   samples_per_pass = shine_samples_per_pass(s);
-  bytesize = samples_per_pass * 2 * (audio_i2s.Settings->rx.slot_type + 1);
+  bytesize = samples_per_pass * 2 * (audio_i2s.Settings->rx.slot_mode + 1);
 
   buffer = (int16_t*)malloc(bytesize);
   if (!buffer) {
@@ -213,25 +217,11 @@ exit:
 int32_t i2s_record_shine(char *path) {
 esp_err_t err = ESP_OK;
 
-  // if (audio_i2s.mic_port == 0) {
-    if (audio_i2s.decoder || audio_i2s.mp3) return 0;
-  // }
-
-  // err = SpeakerMic(0);
-  // if (err) {
-  //   if (audio_i2s.mic_port == 0) {
-  //     SpeakerMic(1);
-  //   }
-  //   AddLog(LOG_LEVEL_INFO, PSTR("mic init error: %d"), err);
-  //   return err;
-  // }
+  if (audio_i2s.decoder || audio_i2s.mp3) return 0;
 
   strlcpy(audio_i2s.mic_path, path, sizeof(audio_i2s.mic_path));
-
   audio_i2s.mic_stop = 0;
-
   uint32_t stack = 4096;
-
   audio_i2s.use_stream = !strcmp(audio_i2s.mic_path, "stream.mp3");
 
   if (audio_i2s.use_stream) {
@@ -244,7 +234,7 @@ esp_err_t err = ESP_OK;
 }
 
 void Cmd_MicRec(void) {
-if (audio_i2s.Settings->rx.mp3_encoder == 0) {
+if (audio_i2s.Settings->rx.mp3_encoder == 1) {
   if (XdrvMailbox.data_len > 0) {
     if (!strncmp(XdrvMailbox.data, "-?", 2)) {
       Response_P("{\"I2SREC-duration\":%d}", audio_i2s.recdur);

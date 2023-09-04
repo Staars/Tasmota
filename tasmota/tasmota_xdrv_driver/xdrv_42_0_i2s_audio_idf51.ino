@@ -47,6 +47,116 @@
 #define USE_I2S_SAY_TIME
 
 /*********************************************************************************************\
+ * Driver Settings in memory
+\*********************************************************************************************/
+
+typedef struct{
+  uint32_t version = 0;
+  struct {
+    uint32_t mode : 2 = 0;        // bit 0+1 STD = 0, PDM = 1, TDM = 2
+    uint32_t apll : 1 = 1;        // bit 2 - will be ignored on unsupported SOC's
+    uint32_t mono : 1 = 0;        // bit 3  0 = stereo, 1 = mono
+    uint32_t codec : 1 = 0;       // bit 4 - S3 box only
+    uint32_t webradio : 1 = 1;    // bit 5 - allocate buffer for webradio
+    uint32_t duplex : 1 = 1;      // bit 6 - request duplex, means RX and TX on 1 slot
+    uint32_t spare01 : 1;         // bit 7
+    uint32_t volume : 8 = 10;     // bit 8-15
+    uint32_t spare02 : 16;        // bit 16-31
+  } tx;
+  struct {
+    struct{
+    uint16_t sample_rate = 32000;
+    uint8_t gain = 30;
+    uint8_t mode = 0;   //STD = 0, PDM = 1, TDM = 2
+
+    uint8_t slot_mask : 2 = 1; // left = 1 /right = 2 /both = 3
+    uint8_t slot_mode : 1 = 0; // mono/stereo - 1 is added for both
+    uint8_t codec : 1 = 0;
+    uint8_t mp3_encoder : 1 = 1; // will be ignored without PS-RAM
+    };
+  } rx;
+} tI2SSettings;
+
+typedef union {
+  uint8_t data;
+  struct {
+    uint8_t master : 1;
+    uint8_t enabled : 1;
+    uint8_t swap_mic : 1;
+    uint8_t mode : 2;
+  };
+} BRIDGE_MODE;
+
+class AudioOutputI2S;
+
+struct AUDIO_I2S_t {
+  tI2SSettings *Settings;
+
+  AudioGeneratorMP3 *mp3 = nullptr;
+  AudioFileSourceFS *file;
+
+  AudioOutputI2S *out;
+
+  AudioFileSourceID3 *id3;
+  AudioGeneratorMP3 *decoder = NULL;
+  void *mp3ram = NULL;
+
+  // Webradio
+  AudioFileSourceICYStream *ifile = NULL;
+  AudioFileSourceBuffer *buff = NULL;
+  char wr_title[64];
+  void *preallocateBuffer = NULL;
+  void *preallocateCodec = NULL;
+  uint32_t retryms = 0;
+
+
+  TaskHandle_t mp3_task_h;
+  TaskHandle_t mic_task_h;
+
+  uint32_t mic_size;
+  uint8_t *mic_buff;
+  char mic_path[32];
+  File fwp;
+  uint8_t mic_stop;
+  int8_t mic_error;
+  bool use_stream = false;
+
+
+// SHINE
+  uint32_t recdur;
+  uint8_t  stream_active;
+  uint8_t  stream_enable;
+  WiFiClient client;
+  ESP8266WebServer *MP3Server;
+
+// I2S_BRIDGE
+  BRIDGE_MODE bridge_mode;
+  WiFiUDP i2s_bridge_udp;
+  WiFiUDP i2s_bridgec_udp;
+  IPAddress i2s_bridge_ip;
+  TaskHandle_t i2s_bridge_h;
+  int8_t ptt_pin = -1;
+
+} audio_i2s;
+
+extern FS *ufsp;
+extern FS *ffsp;
+
+const int preallocateBufferSize = 16*1024;
+const int preallocateCodecSize = 29192; // MP3 codec max mem needed
+//const int preallocateCodecSize = 85332; // AAC+SBR codec max mem needed
+
+enum : int { EXTERNAL_I2S = 0, INTERNAL_DAC = 1, INTERNAL_PDM = 2 };
+
+void sayTime(int hour, int minutes);
+void Cmd_MicRec(void);
+void Cmd_wav2mp3(void);
+void Cmd_Time(void);
+
+void Rtttl(char *buffer);
+void Cmd_I2SRtttl(void);
+
+/*********************************************************************************************\
  * Class for outputting sound as endpoint for ESP8266Audio library
 \*********************************************************************************************/
 
@@ -54,11 +164,11 @@ class AudioOutputI2S : public AudioOutput
 {
   public:
   AudioOutputI2S(){
-    hertz = 44100;
+    hertz = 16000;
     i2sOn = false;
     bps = I2S_DATA_BIT_WIDTH_16BIT;
-    channels = I2S_SLOT_MODE_STEREO;
-    mono = false;
+    mono = (audio_i2s.Settings->tx.mono == 1);
+    channels = mono ? I2S_SLOT_MODE_MONO : I2S_SLOT_MODE_STEREO;
     output_mode = EXTERNAL_I2S;
     tx_is_enabled = false;
   }
@@ -177,6 +287,7 @@ class AudioOutputI2S : public AudioOutput
           },
         };
       i2sOn = (i2s_channel_init_std_mode(tx_chan, &tx_std_cfg) == 0);
+      AddLog(LOG_LEVEL_DEBUG, PSTR("I2S: TX channel with %i bit width on %i channels initialized"),bps, channels);
       return i2sOn;
     }
 
@@ -184,7 +295,9 @@ class AudioOutputI2S : public AudioOutput
       i2s_channel_disable(tx_chan);
       i2s_std_clk_config_t clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(hertz);
 #ifdef SOC_I2S_SUPPORTS_APLL
-      clk_cfg.clk_src = I2S_CLK_SRC_APLL;
+      if(audio_i2s.Settings->tx.apll == 1){
+        clk_cfg.clk_src = I2S_CLK_SRC_APLL;
+      }
 #endif
       int result = i2s_channel_reconfig_std_clock(tx_chan, &clk_cfg );
       if(tx_is_enabled) i2s_channel_enable(tx_chan);
@@ -192,124 +305,7 @@ class AudioOutputI2S : public AudioOutput
     }
 };
 
-typedef union {
-  uint8_t data;
-  struct {
-    uint8_t master : 1;
-    uint8_t enabled : 1;
-    uint8_t swap_mic : 1;
-    uint8_t mode : 2;
-  };
-} BRIDGE_MODE;
 
-/*********************************************************************************************\
- * Driver Settings in memory
-\*********************************************************************************************/
-
-// #pragma pack(push,1)
-typedef struct{
-  uint32_t version = 0;
-  union {
-  uint32_t data = 0;
-  struct {
-    uint32_t mode : 2;        // bit 0+1 STD = 0, PDM = 1, TDM = 2
-    uint32_t apll : 1;        // bit 2
-    uint32_t mono : 1;        // bit 3
-    uint32_t codec : 1;       // bit 4 - S3 box only
-    uint8_t  webradio : 1;    // bit 5 - allocate buffer for webradio
-    uint32_t spare06 : 26;    // bit 6-31
-    };
-  } tx;
-  struct {
-    struct{
-    uint16_t sample_rate = 32000;
-    uint8_t gain = 30;
-    uint8_t mode = 0;
-    uint8_t slot_mode = 0; // left/right/both
-
-    uint8_t slot_type : 1 = 0; // mono/stereo
-    uint8_t codec : 1 = 0;
-    uint8_t mp3_encoder : 1 = 1; // will be ignored without PS-RAM
-    };
-  } rx;
-} tI2SSettings;
-// #pragma pack(pop)
-
-struct AUDIO_I2S_t {
-  tI2SSettings *Settings;
-
-  uint8_t is2_volume; // should be in settings
-
-  AudioGeneratorMP3 *mp3 = nullptr;
-  AudioFileSourceFS *file;
-
-  AudioOutputI2S *out;
-
-  AudioFileSourceID3 *id3;
-  AudioGeneratorMP3 *decoder = NULL;
-  void *mp3ram = NULL;
-
-  // Webradio
-  AudioFileSourceICYStream *ifile = NULL;
-  AudioFileSourceBuffer *buff = NULL;
-  char wr_title[64];
-  void *preallocateBuffer = NULL;
-  void *preallocateCodec = NULL;
-  uint32_t retryms = 0;
-
-
-  TaskHandle_t mp3_task_h;
-  TaskHandle_t mic_task_h;
-
-  uint32_t mic_size;
-  uint8_t *mic_buff;
-  char mic_path[32];
-  File fwp;
-  uint8_t mic_stop;
-  int8_t mic_error;
-  bool use_stream = false;
-
-
-// SHINE
-  uint32_t recdur;
-  uint8_t  stream_active;
-  uint8_t  stream_enable;
-  WiFiClient client;
-  ESP8266WebServer *MP3Server;
-
-  uint8_t mode;
-
-// I2S_BRIDGE
-  BRIDGE_MODE bridge_mode;
-  WiFiUDP i2s_bridge_udp;
-  WiFiUDP i2s_bridgec_udp;
-  IPAddress i2s_bridge_ip;
-  TaskHandle_t i2s_bridge_h;
-  int8_t ptt_pin = -1;
-
-
-} audio_i2s;
-
-
-extern FS *ufsp;
-extern FS *ffsp;
-
-const int preallocateBufferSize = 16*1024;
-const int preallocateCodecSize = 29192; // MP3 codec max mem needed
-//const int preallocateCodecSize = 85332; // AAC+SBR codec max mem needed
-
-
-enum : int { APLL_AUTO = -1, APLL_ENABLE = 1, APLL_DISABLE = 0 };
-enum : int { EXTERNAL_I2S = 0, INTERNAL_DAC = 1, INTERNAL_PDM = 2 };
-
-
-void sayTime(int hour, int minutes);
-void Cmd_MicRec(void);
-void Cmd_wav2mp3(void);
-void Cmd_Time(void);
-
-void Rtttl(char *buffer);
-void Cmd_I2SRtttl(void);
 
 
 /*********************************************************************************************\
@@ -362,7 +358,7 @@ int32_t I2S_Init_0(void) {
   
   audio_i2s.Settings = new tI2SSettings();
   I2SSettingsLoad(false);
-  AddLog(LOG_LEVEL_DEBUG, PSTR("CFG: I2S RX mode: %i, channels: %i, gain: %i, sample rate: %i"), audio_i2s.Settings->rx.mode, (uint8_t)(audio_i2s.Settings->rx.slot_type + 1), audio_i2s.Settings->rx.gain, audio_i2s.Settings->rx.sample_rate);
+  AddLog(LOG_LEVEL_DEBUG, PSTR("CFG: I2S RX mode: %i, channels: %i, gain: %i, sample rate: %i"), audio_i2s.Settings->rx.mode, (uint8_t)(audio_i2s.Settings->rx.slot_mode + 1), audio_i2s.Settings->rx.gain, audio_i2s.Settings->rx.sample_rate);
 
   if(Pin(GPIO_I2S_DIN) != -1){
     result += SpeakerMic(1);
@@ -371,9 +367,7 @@ int32_t I2S_Init_0(void) {
   if(Pin(GPIO_I2S_DOUT) != -1){
     audio_i2s.out = new AudioOutputI2S;
     result += audio_i2s.out->SetPinout();
-    audio_i2s.Settings->tx.webradio = 1;
   }
-  audio_i2s.mode = 0;
 
   return result;
 }
@@ -381,18 +375,20 @@ int32_t I2S_Init_0(void) {
 void I2S_Init(void) {
 
   if (I2S_Init_0() != 0) {
-    return;
+    AddLog(LOG_LEVEL_DEBUG,PSTR("I2S: result not 0"));
+    // return;
   }
 
-  audio_i2s.is2_volume = 10;
+  // audio_i2s.Settings->tx.volume = 10;
   if(Pin(GPIO_I2S_DOUT) != -1){
-    audio_i2s.out->SetGain(((float)audio_i2s.is2_volume / 100.0) * 4.0);
+    audio_i2s.out->SetGain(((float)audio_i2s.Settings->tx.volume / 100.0) * 4.0);
     audio_i2s.out->begin();
     audio_i2s.out->stop();
   }
   audio_i2s.mp3ram = nullptr;
 
   if(audio_i2s.Settings->rx.mp3_encoder == 1){
+    AddLog(LOG_LEVEL_DEBUG,PSTR("I2S: will allocate buffer for mp3 endcoder"));
     if (UsePSRAM()) {
       audio_i2s.mp3ram = heap_caps_malloc(preallocateCodecSize, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     }
@@ -402,6 +398,7 @@ void I2S_Init(void) {
   }
 
   if(audio_i2s.Settings->tx.webradio == 1){
+    AddLog(LOG_LEVEL_DEBUG,PSTR("I2S: will allocate buffer for webradio "));
     if (UsePSRAM()) {
       audio_i2s.preallocateBuffer = heap_caps_malloc(preallocateBufferSize, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
       audio_i2s.preallocateCodec = heap_caps_malloc(preallocateCodecSize, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
@@ -470,6 +467,7 @@ void Webradio(const char *url) {
     audio_i2s.retryms = millis() + 2000;
   }
 
+  AddLog(LOG_LEVEL_DEBUG,PSTR("I2S: will launch webradio task"));
   xTaskCreatePinnedToCore(mp3_task2, "MP3-2", 8192, NULL, 3, &audio_i2s.mp3_task_h, 1);
 }
 
@@ -636,11 +634,11 @@ void Cmd_Play(void) {
 void Cmd_Gain(void) {
   if ((XdrvMailbox.payload >= 0) && (XdrvMailbox.payload <= 100)) {
     if (audio_i2s.out) {
-      audio_i2s.is2_volume=XdrvMailbox.payload;
-      audio_i2s.out->SetGain(((float)(audio_i2s.is2_volume-2)/100.0)*4.0);
+      audio_i2s.Settings->tx.volume = XdrvMailbox.payload;
+      audio_i2s.out->SetGain(((float)(audio_i2s.Settings->tx.volume-2)/100.0)*4.0);
     }
   }
-  ResponseCmndNumber(audio_i2s.is2_volume);
+  ResponseCmndNumber(audio_i2s.Settings->tx.volume);
 }
 
 void Cmd_Say(void) {
