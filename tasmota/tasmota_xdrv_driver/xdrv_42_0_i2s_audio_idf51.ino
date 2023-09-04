@@ -23,6 +23,7 @@
 #define XDRV_42           42
 
 #include "driver/i2s_std.h"
+#include "driver/i2s_pdm.h"
 #include "driver/gpio.h"
 
 #include "AudioFileSourcePROGMEM.h"
@@ -45,6 +46,9 @@
 #define USE_I2S_RTTTL
 #define USE_I2S_SAY_TIME
 
+/*********************************************************************************************\
+ * Class for outputting sound as endpoint for ESP8266Audio library
+\*********************************************************************************************/
 
 class AudioOutputI2S : public AudioOutput
 {
@@ -198,8 +202,42 @@ typedef union {
   };
 } BRIDGE_MODE;
 
+/*********************************************************************************************\
+ * Driver Settings in memory
+\*********************************************************************************************/
+
+// #pragma pack(push,1)
+typedef struct{
+  uint32_t version = 0;
+  union {
+  uint32_t data = 0;
+  struct {
+    uint32_t mode : 2;        // bit 0+1 STD = 0, PDM = 1, TDM = 2
+    uint32_t apll : 1;        // bit 2
+    uint32_t mono : 1;        // bit 3
+    uint32_t codec : 1;       // bit 4 - S3 box only
+    uint8_t  webradio : 1;    // bit 5 - allocate buffer for webradio
+    uint32_t spare06 : 26;    // bit 6-31
+    };
+  } tx;
+  struct {
+    struct{
+    uint16_t sample_rate = 32000;
+    uint8_t gain = 30;
+    uint8_t mode = 0;
+    uint8_t slot_mode = 0; // left/right/both
+
+    uint8_t slot_type : 1 = 0; // mono/stereo
+    uint8_t codec : 1 = 0;
+    uint8_t mp3_encoder : 1 = 1; // will be ignored without PS-RAM
+    };
+  } rx;
+} tI2SSettings;
+// #pragma pack(pop)
 
 struct AUDIO_I2S_t {
+  tI2SSettings *Settings;
+
   uint8_t is2_volume; // should be in settings
 
   AudioGeneratorMP3 *mp3 = nullptr;
@@ -224,21 +262,12 @@ struct AUDIO_I2S_t {
   TaskHandle_t mic_task_h;
 
   uint32_t mic_size;
-  uint32_t mic_rate;
   uint8_t *mic_buff;
   char mic_path[32];
-  uint8_t mic_channels;
   File fwp;
   uint8_t mic_stop;
   int8_t mic_error;
-  int8_t mic_mclk = -1;
-  int8_t mic_bclk = -1;
-  int8_t mic_ws = -1;
-  int8_t mic_din = -1;
-  int8_t mic_dout = -1;
-  uint8_t mic_gain = 1;
   bool use_stream = false;
-  i2s_port_t mic_port;
 
 
 // SHINE
@@ -261,6 +290,7 @@ struct AUDIO_I2S_t {
 
 } audio_i2s;
 
+
 extern FS *ufsp;
 extern FS *ffsp;
 
@@ -282,35 +312,70 @@ void Rtttl(char *buffer);
 void Cmd_I2SRtttl(void);
 
 
-// void copy_micpars(uint32_t port) {
-//   audio_i2s.mic_mclk = audio_i2s.mclk;
-//   audio_i2s.mic_bclk = audio_i2s.bclk;
-//   audio_i2s.mic_ws = audio_i2s.ws;
-//   audio_i2s.mic_dout = audio_i2s.dout;
-//   audio_i2s.mic_din = audio_i2s.din;
-//   audio_i2s.mic_port = (i2s_port_t)port;
-// }
+/*********************************************************************************************\
+ * Driver Settings load and save using filesystem
+\*********************************************************************************************/
+
+void I2SSettingsLoad(bool erase) {
+
+#ifndef USE_UFILESYS
+  AddLog(LOG_LEVEL_INFO, PSTR("CFG: I2S use defaults as file system not enabled"));
+#else
+  char filename[20];
+  // Use for drivers:
+  snprintf_P(filename, sizeof(filename), PSTR(TASM_FILE_DRIVER), XDRV_42);
+  if (erase) {
+    TfsDeleteFile(filename);  // Use defaults
+  }
+  else if (TfsLoadFile(filename, (uint8_t*)audio_i2s.Settings, sizeof(tI2SSettings))) {
+    AddLog(LOG_LEVEL_INFO, PSTR("CFG: I2S loaded from file"));
+  }
+  else {
+    // File system not ready: No flash space reserved for file system
+    AddLog(LOG_LEVEL_DEBUG, PSTR("CFG: I2S use defaults as file system not ready or file not found"));
+    I2SSettingsSave();
+  }
+#endif  // USE_UFILESYS
+}
+
+void I2SSettingsSave(void) {
+#ifdef USE_UFILESYS
+  char filename[20];
+  // Use for drivers:
+  snprintf_P(filename, sizeof(filename), PSTR(TASM_FILE_DRIVER), XDRV_42);
+  if (TfsSaveFile(filename, (const uint8_t*)audio_i2s.Settings, sizeof(tI2SSettings))) {
+    AddLog(LOG_LEVEL_DEBUG, PSTR("CFG: I2S saved to file"));
+  } else {
+    // File system not ready: No flash space reserved for file system
+    AddLog(LOG_LEVEL_DEBUG, PSTR("CFG: ERROR I2S file system not ready or unable to save file"));
+  }
+#endif  // USE_UFILESYS
+}
 
 int32_t I2S_Init_0(void) {
-  if(Pin(GPIO_I2S_BCLK) == -1 || Pin(GPIO_I2S_WS) == -1 || Pin(GPIO_I2S_DOUT) == -1){
+  int result = 0;
+
+  if(Pin(GPIO_I2S_DIN) == -1 && Pin(GPIO_I2S_DOUT) == -1){
     return -1;
   }
-  audio_i2s.out = new AudioOutputI2S;
-  bool result = audio_i2s.out->SetPinout();
+  AddLog(LOG_LEVEL_INFO, PSTR("I2S: init pins bclk=%d, ws=%d, dout=%d, mclk=%d, din=%d"), Pin(GPIO_I2S_BCLK) , Pin(GPIO_I2S_WS), Pin(GPIO_I2S_DOUT), Pin(GPIO_I2S_MCLK), Pin(GPIO_I2S_DIN));
+  
+  audio_i2s.Settings = new tI2SSettings();
+  I2SSettingsLoad(false);
+  AddLog(LOG_LEVEL_DEBUG, PSTR("CFG: I2S RX mode: %i, channels: %i, gain: %i, sample rate: %i"), audio_i2s.Settings->rx.mode, (uint8_t)(audio_i2s.Settings->rx.slot_type + 1), audio_i2s.Settings->rx.gain, audio_i2s.Settings->rx.sample_rate);
 
-  if (result){
-    AddLog(LOG_LEVEL_INFO, PSTR("I2S: init pins bclk=%d, ws=%d, dout=%d, mclk=%d, din=%d"), Pin(GPIO_I2S_BCLK) , Pin(GPIO_I2S_WS), Pin(GPIO_I2S_DOUT), Pin(GPIO_I2S_MCLK), Pin(GPIO_I2S_DIN));
+  if(Pin(GPIO_I2S_DIN) != -1){
+    result += SpeakerMic(1);
   }
-  else{
-    return -1;
+
+  if(Pin(GPIO_I2S_DOUT) != -1){
+    audio_i2s.out = new AudioOutputI2S;
+    result += audio_i2s.out->SetPinout();
+    audio_i2s.Settings->tx.webradio = 1;
   }
-  // if (audio_i2s.mic_port != 0) {
-  //   AddLog(LOG_LEVEL_INFO, PSTR("Init audio I2S mic: port=%d, bclk=%d, ws=%d, din=%d"), audio_i2s.mic_port, audio_i2s.mic_bclk, audio_i2s.mic_ws, audio_i2s.mic_din);
-  // }
+  audio_i2s.mode = 0;
 
-  // audio_i2s.mode = MODE_SPK;
-
-  return 0;
+  return result;
 }
 
 void I2S_Init(void) {
@@ -320,29 +385,31 @@ void I2S_Init(void) {
   }
 
   audio_i2s.is2_volume = 10;
-  audio_i2s.out->SetGain(((float)audio_i2s.is2_volume / 100.0) * 4.0);
-  audio_i2s.out->begin();
-  audio_i2s.out->stop();
+  if(Pin(GPIO_I2S_DOUT) != -1){
+    audio_i2s.out->SetGain(((float)audio_i2s.is2_volume / 100.0) * 4.0);
+    audio_i2s.out->begin();
+    audio_i2s.out->stop();
+  }
   audio_i2s.mp3ram = nullptr;
 
-  if (UsePSRAM()) {
-    audio_i2s.mp3ram = heap_caps_malloc(preallocateCodecSize, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if(audio_i2s.Settings->rx.mp3_encoder == 1){
+    if (UsePSRAM()) {
+      audio_i2s.mp3ram = heap_caps_malloc(preallocateCodecSize, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    }
+    else{
+      audio_i2s.Settings->rx.mp3_encoder = 0; // no PS-RAM -> no MP3 encoding
+    }
   }
 
-  if (UsePSRAM()) {
-    audio_i2s.preallocateBuffer = heap_caps_malloc(preallocateBufferSize, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    audio_i2s.preallocateCodec = heap_caps_malloc(preallocateCodecSize, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-  } else {
-    audio_i2s.preallocateBuffer = malloc(preallocateBufferSize);
-    audio_i2s.preallocateCodec = malloc(preallocateCodecSize);
+  if(audio_i2s.Settings->tx.webradio == 1){
+    if (UsePSRAM()) {
+      audio_i2s.preallocateBuffer = heap_caps_malloc(preallocateBufferSize, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+      audio_i2s.preallocateCodec = heap_caps_malloc(preallocateCodecSize, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    } else {
+      audio_i2s.preallocateBuffer = malloc(preallocateBufferSize);
+      audio_i2s.preallocateCodec = malloc(preallocateCodecSize);
+    }
   }
-  if (!audio_i2s.preallocateBuffer || !audio_i2s.preallocateCodec) {
-    //Serial.printf_P(PSTR("FATAL ERROR:  Unable to preallocate %d bytes for app\n"), preallocateBufferSize+preallocateCodecSize);
-  }
-
-  // audio_i2s.mic_channels = MIC_CHANNELS;
-  // audio_i2s.mic_rate = MICSRATE;
-
 }
 
 void mp3_task(void *arg) {
@@ -387,6 +454,7 @@ void StatusCallback(void *cbData, int code, const char *string) {
 void Webradio(const char *url) {
   if (audio_i2s.decoder || audio_i2s.mp3) return;
   if (!audio_i2s.out) return;
+  if (audio_i2s.Settings->tx.webradio == 0) return;
   AUDIO_PWR_ON
   audio_i2s.ifile = new AudioFileSourceICYStream(url);
   audio_i2s.ifile->RegisterMetadataCB(MDCallback, NULL);
@@ -532,7 +600,7 @@ void Say(char *text) {
 
 const char kI2SAudio_Commands[] PROGMEM = "I2S|"
   "Say|Gain|Time|Rtttl|Play|WR"
-#if defined(USE_SHINE) && ( (defined(USE_I2S_AUDIO) && defined(USE_I2S_MIC)) || defined(USE_M5STACK_CORE2) || defined(ESP32S3_BOX) )
+#if defined(USE_I2S_MIC)
   "|REC"
   "|MGain"
 #if defined(USE_SHINE) && defined(MP3_MIC_STREAM)
@@ -541,12 +609,12 @@ const char kI2SAudio_Commands[] PROGMEM = "I2S|"
 #ifdef I2S_BRIDGE
   "|BRIDGE"
 #endif // I2S_BRIDGE
-#endif // USE_SHINE
+#endif // USE_I2S_MIC
 ;
 
 void (* const I2SAudio_Command[])(void) PROGMEM = {
   &Cmd_Say, &Cmd_Gain,&Cmd_Time,&Cmd_I2SRtttl,&Cmd_Play,&Cmd_WebRadio
-#if  defined(USE_SHINE) && ( (defined(USE_I2S_AUDIO) && defined(USE_I2S_MIC)) || defined(USE_M5STACK_CORE2) || defined(ESP32S3_BOX) )
+#if defined(USE_I2S_MIC)
   ,&Cmd_MicRec
   ,&Cmd_MicGain
 #if defined(USE_SHINE) && defined(MP3_MIC_STREAM)
@@ -555,7 +623,7 @@ void (* const I2SAudio_Command[])(void) PROGMEM = {
 #ifdef I2S_BRIDGE
   ,&Cmd_I2SBridge
 #endif // I2S_BRIDGE
-#endif // USE_SHINE
+#endif // USE_I2S_MIC
 };
 
 void Cmd_Play(void) {
