@@ -499,13 +499,6 @@ uint32_t WcSetup(int32_t fsiz) {
   return Wc.up;
 }
 
-#ifdef USE_WEBCAM_BERRY
-bool WcRunning() {
-  return Wc.up;
-}
-
-#endif
-
 /*********************************************************************************************/
 #ifndef USE_WEBCAM_SETUP_ONLY
 int32_t WcSetOptions(uint32_t sel, int32_t value) {
@@ -638,9 +631,9 @@ uint32_t WcGetHeight(void) {
   esp_camera_fb_return(wc_fb);
   return Wc.height;
 }
-#endif //USE_WEBCAM_SETUP_ONLY
+
 /*********************************************************************************************/
-#ifndef USE_WEBCAM_SETUP_ONLY
+
 struct WC_Motion {
 uint16_t motion_detect;
 uint32_t motion_ltime;
@@ -783,10 +776,9 @@ pcopy:
 
   return  _jpg_buf_len;
 }
-#endif// USE_WEBCAM_SETUP_ONLY
+
 //////////////// Handle authentication /////////////////
 
-#ifndef USE_WEBCAM_SETUP_ONLY
 bool WebcamAuthenticate(void)
 {
   if (strlen(SettingsText(SET_WEBPWD)) && (HTTP_MANAGER_RESET_ONLY != Web.state)) {
@@ -1019,9 +1011,9 @@ void HandleWebcamRoot(void) {
   Wc.CamServer->send(302, "", "");
   AddLog(LOG_LEVEL_DEBUG, PSTR("CAM: Root called"));
 }
-#endif // USE_WEBCAM_SETUP_ONLY
+
 /*********************************************************************************************/
-#ifndef USE_WEBCAM_SETUP_ONLY
+
 uint32_t WcSetStreamserver(uint32_t flag) {
   if (TasmotaGlobal.global_state.network_down) { 
     Wc.stream_active = 0;
@@ -1060,9 +1052,9 @@ void WcInterruptControl() {
   }
 
 }
-#endif // USE_WEBCAM_SETUP_ONLY
+
 /*********************************************************************************************/
-#ifndef USE_WEBCAM_SETUP_ONLY
+
 
 void WcLoop(void) {
   // if (4 == Wc.stream_active) { return; }
