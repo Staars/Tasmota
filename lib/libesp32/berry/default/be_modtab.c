@@ -55,6 +55,9 @@ be_extern_native_module(mdns);
 #ifdef USE_ZIGBEE
 be_extern_native_module(zigbee);
 #endif // USE_ZIGBEE
+#ifdef USE_WEBCAM_BERRY
+be_extern_native_module(webcam);
+#endif // USE_WEBCAM_BERRY
 // BLE
 be_extern_native_module(MI32);
 be_extern_native_module(BLE);
@@ -182,6 +185,9 @@ BERRY_LOCAL const bntvmodule_t* const be_module_table[] = {
     &be_native_module(MI32),
     &be_native_module(BLE),
 #endif //USE_MI_ESP32
+#ifdef USE_WEBCAM_BERRY
+    &be_native_module(webcam),
+#endif 
 #ifdef USE_DISCOVERY
     &be_native_module(mdns),
 #endif // USE_DISCOVERY
