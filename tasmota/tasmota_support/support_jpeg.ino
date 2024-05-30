@@ -19,7 +19,7 @@
 
 
 #ifdef ESP32
-#ifdef JPEG_PICTS
+#if defined(JPEG_PICTS) || defined(USE_BERRY_IMAGE)
 
 #include "img_converters.h"
 #include "esp_jpg_decode.h"
@@ -152,7 +152,7 @@ char get_jpeg_size(unsigned char* data, unsigned int data_size, unsigned short *
          while(i<data_size) {
             i+=block_length;               //Increase the file index to get to the next block
             if(i >= data_size) return false;   //Check to protect against segmentation faults
-            if(data[i] != 0xFF) return false;   //Check that we are truly at the start of another block
+            if (data[i] != 0xFF) return false;
             if(data[i+1] == 0xC0) {            //0xFFC0 is the "Start of frame" marker which contains the file size
                //The structure of the 0xFFC0 block is quite simple [0xFFC0][ushort length][uchar precision][ushort x][ushort y]
                *height = data[i+5]*256 + data[i+6];
@@ -165,10 +165,9 @@ char get_jpeg_size(unsigned char* data, unsigned int data_size, unsigned short *
                block_length = data[i] * 256 + data[i+1];   //Go to the next block
             }
          }
-         return false;                     //If this point is reached then no size was found
-      }else{ return false; }                  //Not a valid JFIF string
-
-   }else{ return false; }                     //Not a valid SOI header
+      }
+   }
+   return false;               //Not a valid SOI header
 }
 
 

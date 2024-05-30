@@ -1366,4 +1366,14 @@
   #define USE_I2S_AUDIO_BERRY
 #endif // USE_I2S_ALL
 
+/*********************************************************************************************\
+ * Post-process Berry and LVGL
+\*********************************************************************************************/
+
+#if defined(USE_BERRY_LVGL)
+  #define USE_LVGL
+  #define USE_DISPLAY
+  #define USE_UNIVERSAL_DISPLAY
+#endif // USE_BERRY_LVGL
+
 #endif  // _MY_USER_CONFIG_H_
