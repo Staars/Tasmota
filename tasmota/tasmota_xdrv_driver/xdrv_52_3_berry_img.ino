@@ -26,9 +26,6 @@
 
 #include "esp_camera.h"
 
-#ifdef USE_BERRY_LVGL
-#include "lvgl.h"
-#endif // USE_BERRY_LVGL
 
 /*********************************************************************************************\
  *
@@ -47,37 +44,127 @@ typedef struct {
 \*********************************************************************************************/
 
 struct be_img_util {
-    static bool from_jpg(image_t *img, uint8_t* buffer, size_t len) {
-      uint16_t width, height;
-      if(get_jpeg_size(buffer, len, &width, &height) != true){
-        return false;
-      }
-      pixformat_t format = PIXFORMAT_JPEG;
-      return from_buffer(img, buffer, len, width, height, format);
+  static void clear(image_t *img){
+    if(img->buf){
+      free(img->buf);
+      img->buf = nullptr;
     }
+    img->len = 0;
+    img->format = PIXFORMAT_JPEG;
+    img->width = 0;
+    img->height = 0;
+  }
 
-    static bool from_buffer(image_t *img, uint8_t* buffer, size_t len, uint16_t w, uint16_t h, pixformat_t f) {
-      if(img->buf != nullptr) {
-        free(img->buf);
-      }
-      img->buf = (uint8_t *)heap_caps_malloc((len)+4, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-      if(img->buf) {
-        memcpy(img->buf,buffer,len);
-        img->len = len;
-        img->format = f;
-        img->width = w;
-        img->height = h;
-        return true;
-      }
+  static int getBytesPerPixel(pixformat_t f){
+    int bpp;
+    switch(f) {
+      case PIXFORMAT_GRAYSCALE:
+        bpp = 1;
+        break;
+      case PIXFORMAT_RGB565:
+        bpp = 2;
+        break;
+      default:
+        bpp = 3;
+    }
+    return bpp;
+  }
+
+  static bool from_jpg(image_t *img, uint8_t* buffer, size_t len) {
+    uint16_t width, height;
+    if(jpeg_size(buffer, len, &width, &height) != true){
       return false;
     }
-};
+    pixformat_t format = PIXFORMAT_JPEG;
+    return from_buffer(img, buffer, len, width, height, format);
+  }
 
+  static bool from_buffer(image_t *img, uint8_t* buffer, size_t len, uint16_t w, uint16_t h, pixformat_t f) {
+    if(img->buf != nullptr) {
+      free(img->buf);
+    }
+    img->buf = (uint8_t *)heap_caps_malloc((len)+4, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if(img->buf) {
+      memcpy(img->buf,buffer,len);
+      img->len = len;
+      img->format = f;
+      img->width = w;
+      img->height = h;
+      return true;
+    }
+    return false;
+  }
+
+  static void rgb888_to_grayscale_inplace(uint8_t * buffer, size_t buffer_len){
+    uint8_t r, g, b;
+    for (uint32_t cnt=0; cnt<buffer_len; cnt+=3) {
+      r = buffer[cnt];
+      g = buffer[cnt+1];
+      b = buffer[cnt+2];
+      buffer[cnt/3] = (r + g + b) / 3;
+    }
+  }
+
+  static void rgb888_to_565_inplace(uint8_t * buffer, size_t buffer_len){
+    union{
+      uint8_t* temp_buf ;
+      uint16_t* temp_buf_16;
+    };
+    temp_buf = buffer;
+    uint8_t red, grn, blu;
+    uint16_t r, g, b;
+    int j = 0;
+    for (uint32_t i=0; i < buffer_len; i+=3) {
+      blu = temp_buf[i];
+      grn = temp_buf[i+1];
+      red = temp_buf[i+2];
+      b = (blu >> 3) & 0x1f;
+      g = ((grn >> 2) & 0x3f) << 5;
+      r = ((red >> 3) & 0x1f) << 11;
+      temp_buf_16[j++] = (r | g | b);
+    }
+  }
+
+  // https://web.archive.org/web/20131016210645/http://www.64lines.com/jpeg-width-height , but shorter now by 48 bytes flash
+  static bool jpeg_size(uint8_t* buffer, size_t data_size, uint16_t *width, uint16_t *height) {
+    union{
+      uint8_t * data;
+      uint16_t * data16;
+      uint32_t * data32;
+    };
+    data = buffer;
+    if(data32[0] == 0xE0FFD8FF) {
+      // Check for valid JPEG header (null terminated JFIF)
+      // if(data[i+2] == 'J' && data[i+3] == 'F' && data[i+4] == 'I' && data[i+5] == 'F' && data[i+6] == 0x00) {
+      if(data16[3] == 0x464a && data16[4] == 0x4649) {
+          //Retrieve the block length of the first block since the first block will not contain the size of file
+        int i = 20;
+        uint16_t block_length = 0;
+        while(i<data_size) {
+          i+=block_length;               //Increase the file index to get to the next block
+          if(i >= data_size) return false;   //Check to protect against segmentation faults
+          if (data[i] != 0xFF) return false;
+          if(data[i+1] == 0xC0) {            //0xFFC0 is the "Start of frame" marker which contains the file size
+            //The structure of the 0xFFC0 block is quite simple [0xFFC0][ushort length][uchar precision][ushort x][ushort y]
+            *height = data[i+5]*256 + data[i+6];
+            *width = data[i+7]*256 + data[i+8];
+            return true;
+          }
+          else
+          {
+            i+=2;                              //Skip the block marker
+            block_length = data[i] * 256 + data[i+1];   //Go to the next block
+          }
+        }
+      }
+    }
+    return false;               //Not a valid SOI header
+  }
+};
 
 /*********************************************************************************************\
  * Native functions mapped to Berry functions
 \*********************************************************************************************/
-
 
 extern "C" {
   image_t* be_get_image_instance(struct bvm *vm);
@@ -116,7 +203,6 @@ extern "C" {
     else{
       be_raise(vm, "img_error", "wrong args for jpg buffer");
     }
-
     be_return(vm);
   }
 
@@ -143,42 +229,6 @@ extern "C" {
     be_return(vm);
   }
 
-int be_img_lv_img_dsc(bvm *vm, void *image);
-int be_img_lv_img_dsc(bvm *vm, void *image) {
-#ifdef USE_BERRY_LVGL
-    lv_obj_t *_i;
-    image_t * img = be_get_image_instance(vm);
-    if(!img){
-      be_raise(vm, "img_error", "no image instance");
-      be_return(vm);
-    }
-    int32_t argc = be_top(vm); // Get the number of arguments
-    if (argc == 2 && be_isinstance(vm, 2)){
-      be_getglobal(vm, "lv_image");
-      be_getmember(vm, 2, "_p");
-      _i = (lv_obj_t *)be_tocomptr(vm, -1);
-      be_pop(vm, 1);  // remove _p attribute
-    }
-    if(!_i) {
-      be_raise(vm, "img_error", "no LV image to set");
-      be_return(vm);
-    }
-    if(img->format != PIXFORMAT_RGB565){
-      be_raise(vm, "img_error", "only RGB565 supported");
-      be_return(vm);
-    }
-    lv_image_dsc_t _img_dsc;
-    _img_dsc.header.magic = LV_IMAGE_HEADER_MAGIC;
-    _img_dsc.header.w = img->width;
-    _img_dsc.header.h = img->height;
-    _img_dsc.header.cf = LV_COLOR_FORMAT_NATIVE;
-    _img_dsc.data_size = img->len;
-    _img_dsc.data = (const uint8_t*)img->buf;
-    lv_image_set_src(_i, &_img_dsc);
-    be_return_nil(vm);
-#endif // USE_BERRY_LVGL
-  }
-
   int be_img_get_buffer(struct bvm *vm); //(roi)
   int be_img_get_buffer(struct bvm *vm) {
     image_t * img = be_get_image_instance(vm);
@@ -203,58 +253,34 @@ int be_img_lv_img_dsc(bvm *vm, void *image) {
     int32_t argc = be_top(vm);
     if (argc == 2 && be_isint(vm, 2)) {
       uint32_t format = be_toint(vm, 2);
-      union{
-        uint8_t* temp_buf = nullptr;
-        uint16_t* temp_buf_16;
-      };
+      uint8_t* temp_buf = nullptr;
+
       if(img->format == format){
         be_raise(vm, "img_error", "no format change");
         be_return(vm);
       }
       uint16_t bpp = 3; // most likely byte-per-pixel value
-      size_t pixel_count = img->width * img->height ;
+      const size_t pixel_count = img->width * img->height ;
       size_t  temp_buf_len = pixel_count * bpp;
       temp_buf = (uint8_t *)heap_caps_malloc((temp_buf_len)+4, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
       if(temp_buf == nullptr) {
         be_raise(vm, "img_error", "not enough heap");
         be_return_nil(vm);
       }
-      // if(!jpg2rgb888(img->buf, img->len, temp_buf, jpg_scale_t(1))){
-      if(!fmt2rgb888((const uint8_t *)img->buf, img->len, pixformat_t(format), temp_buf)){
+
+      if(!fmt2rgb888((const uint8_t *)img->buf, img->len, img->format, temp_buf)) {
         free(temp_buf);
         be_raise(vm, "img_error", "not enough heap");
         be_return_nil(vm);
       }
       switch(format){
         case PIXFORMAT_GRAYSCALE: // always from temporary RGB88
-          {
-            uint8_t r, g, b;
-            for (uint32_t cnt=0; cnt<temp_buf_len; cnt+=3) {
-              r = temp_buf[cnt];
-              g = temp_buf[cnt+1];
-              b = temp_buf[cnt+2];
-              temp_buf[cnt/3] = (r + g + b) / 3;
-            }
-            temp_buf_len = img->width * img->height;
-          }
+          be_img_util::rgb888_to_grayscale_inplace(temp_buf,temp_buf_len);
+          temp_buf_len = pixel_count;
           break;
         case PIXFORMAT_RGB565: // always from temporary RGB88
-            {
-              temp_buf_len = pixel_count * 2;
-              uint8_t red, grn, blu;
-              uint8_t r, g, b;
-              int from = 0;
-              for (uint32_t i=0; i<pixel_count; i+=2) {
-                blu = temp_buf[from++];
-                grn = temp_buf[from++];
-                red = temp_buf[from++];
-                b = (blu >> 3) & 0x1f;
-                g = ((grn >> 2) & 0x3f) << 5;
-                r = ((red >> 3) & 0x1f) << 11;
-                temp_buf_16[i] = (uint16_t)(r | g | b);
-              }
-            }
-          // jpg2rgb565(img->buf, img->len, temp_buf , JPG_SCALE_NONE);
+          be_img_util::rgb888_to_565_inplace(temp_buf,temp_buf_len);
+          temp_buf_len = pixel_count * 2;
           break;
         case PIXFORMAT_RGB888:
          // should already be there
@@ -269,9 +295,13 @@ int be_img_lv_img_dsc(bvm *vm, void *image) {
          break;
       }
       free(img->buf);
+      img->format = pixformat_t(format);
       img->len = temp_buf_len;
       img->buf = (uint8_t*)heap_caps_realloc((void*)temp_buf, img->len, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT); // shrinking should never fail ...
-      img->format = pixformat_t(format);
+      if(img->buf == nullptr) {
+        be_img_util::clear(img);
+        be_raise(vm, "img_error", "reallocation failed");
+      }
     }
     be_return(vm);
   }

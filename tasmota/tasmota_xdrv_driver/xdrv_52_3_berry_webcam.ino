@@ -23,7 +23,7 @@
 #include <berry.h>
 
 #if defined(USE_WEBCAM)
-#ifdef USE_BERRY_CAM
+#ifdef USE_BERRY_CAM // driver name is webcam in order to have this code behind the berry_img driver
 #define USE_WEBCAM_SETUP_ONLY
 
 #include "esp_camera.h"
@@ -63,6 +63,7 @@ extern "C" {
       if(wc_fb){
         WcBerry.width = wc_fb->width;
         WcBerry.height = wc_fb->height;
+        esp_camera_fb_return(wc_fb);
       }
     }
     be_pushint(vm, result);
@@ -83,11 +84,60 @@ extern "C" {
     WcBerry.height = wc_fb->height;
 
     int32_t argc = be_top(vm);
-    if (argc == 1 && be_isinstance(vm, 1)) {
-      be_getglobal(vm, "img");
+    if (argc >= 1 && be_isinstance(vm, 1)) {
+      const char * c = be_classname(vm, 1);
+      if(strcmp(c,"img") != 0) {
+        be_raise(vm, "cam_error", "instance not of img class");
+        esp_camera_fb_return(wc_fb);
+        be_return_nil(vm);
+      }
       image_t * img = be_get_image_instance(vm);
+      int format = -1;
+      if (argc == 2 && be_isint(vm, 2)) {
+        format =  be_toint(vm, 2);
+        if(format == PIXFORMAT_GRAYSCALE){
+          be_raise(vm, "cam_error", "no support for GRAYSCALE"); // maybe later
+          be_return_nil(vm);
+        }
+      }
       if(img){
-        be_img_util::from_buffer(img,wc_fb->buf, wc_fb->len, wc_fb->width, wc_fb->height, PIXFORMAT_JPEG);
+        if(format < 0 || format == PIXFORMAT_JPEG){
+          be_img_util::from_buffer(img,wc_fb->buf, wc_fb->len, wc_fb->width, wc_fb->height, PIXFORMAT_JPEG);
+        } 
+        else {
+          bool success = false;
+          int bpp = be_img_util::getBytesPerPixel(pixformat_t(format));
+          if(wc_fb->width * wc_fb->height * bpp != img->len){ // we do not really want tu use it like that
+            img->buf = (uint8_t*)heap_caps_realloc((void*)img->buf, wc_fb->width * wc_fb->height * bpp, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+            if(!img->buf){
+              be_img_util::clear(img);
+              be_raise(vm, "cam_error", "reallocation failed");
+              be_return_nil(vm);
+            }
+          }
+          switch(pixformat_t(format)) {
+            case PIXFORMAT_RGB565:
+              success = jpg2rgb565(wc_fb->buf, wc_fb->len, img->buf, JPG_SCALE_NONE);
+              break;
+            case PIXFORMAT_RGB888:
+              success = jpg2rgb888(wc_fb->buf, wc_fb->len, img->buf, JPG_SCALE_NONE);
+              break;
+          }
+          if(success){
+            img->len = wc_fb->width * wc_fb->height * bpp;
+            img->format = pixformat_t(format);
+            img->width =  wc_fb->width;
+            img->height = wc_fb->height;
+          } else {
+            be_img_util::clear(img);
+          }
+
+
+        }
+      }
+      else{
+        be_raise(vm, "cam_error", "no image store");
+        be_return_nil(vm);
       }
     }
     else{
