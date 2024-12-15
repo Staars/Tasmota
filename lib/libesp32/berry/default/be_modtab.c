@@ -52,7 +52,11 @@ be_extern_native_module(crc);
 be_extern_native_module(crypto);
 be_extern_native_module(ULP);
 be_extern_native_module(TFL);
+be_extern_native_module(miniz);
 be_extern_native_module(mdns);
+#ifdef USE_TAMP_COMPRESSION
+be_extern_native_module(tamp);
+#endif //USE_TAMP_COMPRESSION
 #ifdef USE_ZIGBEE
 be_extern_native_module(zigbee);
 be_extern_native_module(matter_zigbee);
@@ -197,6 +201,12 @@ BERRY_LOCAL const bntvmodule_t* const be_module_table[] = {
 #ifdef USE_MATTER_DEVICE
     &be_native_module(matter),
 #endif // USE_MATTER_DEVICE
+#ifdef USE_MINIZ_COMPRESSION
+    &be_native_module(miniz),
+#endif // USE_MINIZ_COMPRESSION
+#ifdef USE_TAMP_COMPRESSION
+    &be_native_module(tamp),
+#endif // USE_TAMP_COMPRESSION
 #endif // TASMOTA
     CUSTOM_NATIVE_MODULES
     /* user-defined modules register end */
