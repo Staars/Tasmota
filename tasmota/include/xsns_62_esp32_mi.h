@@ -189,6 +189,7 @@ struct {
   TaskHandle_t ConnTask = nullptr;
   TaskHandle_t ServerTask = nullptr;
   MI32connectionContextBerry_t *conCtx = nullptr;
+  uint16_t connID;
   union {
     struct {
       uint32_t init:1;
@@ -198,6 +199,7 @@ struct {
       uint32_t runningScan:1;
       uint32_t updateScan:1;
       uint32_t deleteScanTask:1;
+      uint32_t IRKinCfg:1;
 
 
       uint32_t canConnect:1;
@@ -401,7 +403,7 @@ const char kMI32DeviceType[] PROGMEM = {"Flora|MJ_HT_V1|LYWSD02|LYWSD03|CGG1|CGD
 
 const char kMI32_ConnErrorMsg[] PROGMEM = "no Error|could not connect|did disconnect|got no service|got no characteristic|can not read|can not notify|can not write|did not write|notify time out";
 
-const char kMI32_BLEInfoMsg[] PROGMEM = "Scan ended|Got Notification|Did connect|Did disconnect|Still connected|Start passive scanning|Start active scanning|Server characteristic set|Server advertisement set|Server scan response set|Server client did connect|Server client did disconnect";
+const char kMI32_BLEInfoMsg[] PROGMEM = "Scan ended|Got Notification|Did connect|Did disconnect|Still connected|Start passive scanning|Start active scanning|Server characteristic set|Server advertisement set|Server scan response set|Server client did connect|Server client did disconnect| Server client did authenticate";
 
 const char kMI32_ButtonMsg[] PROGMEM = "Single|Double|Hold"; //mapping: in Tasmota: 1,2,3 ; for HomeKit and Xiaomi 0,1,2
 /*********************************************************************************************\
@@ -444,6 +446,7 @@ BLE_OP_ON_SUBSCRIBE_TO_NOTIFICATIONS_AND_INDICATIONS,
 BLE_OP_ON_CONNECT,
 BLE_OP_ON_DISCONNECT,
 BLE_OP_ON_STATUS,
+BLE_OP_ON_AUTHENTICATED
 };
 
 enum MI32_ConnErrorMsg {
@@ -471,7 +474,8 @@ enum MI32_BLEInfoMsg {
   MI32_SERV_ADVERTISEMENT_ADDED,
   MI32_SERV_SCANRESPONSE_ADDED,
   MI32_SERV_CLIENT_CONNECTED,
-  MI32_SERV_CLIENT_DISCONNECTED
+  MI32_SERV_CLIENT_DISCONNECTED,
+  MI32_SERV_CLIENT_AUTHENTICATED
 };
 
 /*********************************************************************************************\

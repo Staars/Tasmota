@@ -1200,8 +1200,8 @@ void setDetails(ble_advertisment_t *ad){
 
   BLEAdvertisedDevice *advertisedDevice = ad->advertisedDevice;
 
-  uint8_t* payload = advertisedDevice->getPayload();
-  size_t payloadlen = advertisedDevice->getPayloadLength();
+  const uint8_t* payload = advertisedDevice->getPayload().data();
+  size_t payloadlen = advertisedDevice->getPayload().size();
   if (payloadlen  && (maxlen > 30)){ // will truncate if not enough space
     strcpy(p, ",\"p\":\"");
     p += 6;
@@ -1333,11 +1333,11 @@ static BLESensorCallback clientCB;
 
 
 class BLEAdvCallbacks: public NimBLEScanCallbacks {
-  void onScanEnd(NimBLEScanResults results) {
+  void onScanEnd(const NimBLEScanResults results) {
     BLEscanEndedCB(results);
   }
 
-  void onResult(NimBLEAdvertisedDevice* advertisedDevice) {
+  void onResult(const NimBLEAdvertisedDevice* advertisedDevice) {
     TasAutoMutex localmutex(&BLEOperationsRecursiveMutex, "BLEAddCB");
     uint64_t now = esp_timer_get_time();
     BLEScanLastAdvertismentAt = now; // note the time of the last advertisment
@@ -1354,7 +1354,7 @@ class BLEAdvCallbacks: public NimBLEScanCallbacks {
 
     BLEAdvertisment.addrtype = address.getType();
 
-    memcpy(BLEAdvertisment.addr, address.getNative(), 6);
+    memcpy(BLEAdvertisment.addr, address.getVal(), 6);
     ReverseMAC(BLEAdvertisment.addr);
 
     BLEAdvertisment.RSSI = RSSI;
@@ -1480,7 +1480,7 @@ static void BLEGenNotifyCB(NimBLERemoteCharacteristic* pRemoteCharacteristic, ui
   if (BLEDebugMode > 0) AddLog(LOG_LEVEL_DEBUG,PSTR("BLE: Notified length: %u"),length);
 #endif
   // find the operation this is associated with
-  NimBLERemoteService *pSvc = pRemoteCharacteristic->getRemoteService();
+  const NimBLERemoteService *pSvc = pRemoteCharacteristic->getRemoteService();
 
   if (!pSvc){
 #ifdef BLE_ESP32_DEBUG
@@ -3396,7 +3396,7 @@ std::string BLETriggerResponse(generic_sensor_t *toSend){
   if (toSend->addr != NimBLEAddress()){
     out = out + "\",\"MAC\":\"";
     uint8_t addrrev[6];
-    memcpy(addrrev, toSend->addr.getNative(), 6);
+    memcpy(addrrev, toSend->addr.getVal(), 6);
     ReverseMAC(addrrev);
     dump(temp, 13, addrrev, 6);
     out = out + temp;

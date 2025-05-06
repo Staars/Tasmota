@@ -397,7 +397,7 @@ int EQ3ParseOp(BLE_ESP32::generic_sensor_t *op, bool success, int retries){
   ResponseClear();
 
   uint8_t addrev[7];
-  const uint8_t *native = op->addr.getNative();
+  const uint8_t *native = op->addr.getVal();
   memcpy(addrev, native, 6);
   BLE_ESP32::ReverseMAC(addrev);
 
@@ -594,7 +594,7 @@ int EQ3GenericOpCompleteFn(BLE_ESP32::generic_sensor_t *op){
 
   if (op->state <= GEN_STATE_FAILED){
     uint8_t addrev[7];
-    const uint8_t *native = op->addr.getNative();
+    const uint8_t *native = op->addr.getVal();
     memcpy(addrev, native, 6);
     BLE_ESP32::ReverseMAC(addrev);
 
@@ -845,8 +845,8 @@ int TaskEQ3advertismentCallback(BLE_ESP32::ble_advertisment_t *pStruct)
   if (BLE_ESP32::BLEDebugMode) AddLog(LOG_LEVEL_DEBUG, PSTR("EQ3: %s: saw device"),advertisedDevice->getAddress().toString().c_str());
 #endif
 
-  uint8_t* payload = advertisedDevice->getPayload();
-  size_t payloadlen = advertisedDevice->getPayloadLength();
+  const uint8_t* payload = advertisedDevice->getPayload().data();
+  size_t payloadlen = advertisedDevice->getPayload().size();
 
   char name[20] = {0};
   char serial[20] = {0};

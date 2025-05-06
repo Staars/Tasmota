@@ -239,7 +239,7 @@ int advertismentCallback(BLE_ESP32::ble_advertisment_t *pStruct)
       BLEBeacon oBeacon = BLEBeacon();
       oBeacon.setData(std::string((char *)manufacturerData, manufacturerDataLen));
       uint8_t UUID[16];
-      memcpy(UUID,oBeacon.getProximityUUID().getNative()->u128.value,16);
+      memcpy(UUID,oBeacon.getProximityUUID().getValue(),16);
       ESP32BLE_ReverseStr(UUID,16);
 
 //      uint16_t    Major = ENDIAN_CHANGE_U16(oBeacon.getMajor());

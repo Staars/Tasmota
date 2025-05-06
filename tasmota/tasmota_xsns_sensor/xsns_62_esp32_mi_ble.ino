@@ -1097,12 +1097,12 @@ int MI32advertismentCallback(BLE_ESP32::ble_advertisment_t *pStruct)
 
   NimBLEUUID UUIDBig = advertisedDevice->getServiceDataUUID(0);//.getNative()->u16.value;
 
-  const ble_uuid_any_t* native = UUIDBig.getNative();
-  if (native->u.type != 16){
+  const ble_uuid_t* native = UUIDBig.getBase();
+  if (native->type != 16){
     //not interested in 128 bit;
     return 0;
   }
-  uint16_t UUID = native->u16.value;
+  uint16_t UUID = *(uint16_t*)UUIDBig.getValue();
 
   if (BLE_ESP32::BLEDebugMode) AddLog(LOG_LEVEL_DEBUG_MORE, PSTR("M32: %s: svc[0] UUID (%x)"), MIaddrStr(addr), UUID);
   std::string ServiceDataStr = advertisedDevice->getServiceData(0);
