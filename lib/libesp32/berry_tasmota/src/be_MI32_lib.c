@@ -70,8 +70,8 @@ BE_FUNC_CTYPE_DECLARE(be_BLE_set_MAC, "", "@(bytes)~[i]");
 extern void be_BLE_set_characteristic(struct bvm *vm, const char *Chr);
 BE_FUNC_CTYPE_DECLARE(be_BLE_set_characteristic, "", "@s");
 
-extern void be_BLE_run(struct bvm *vm, uint8_t operation, bbool response, int32_t arg1);
-BE_FUNC_CTYPE_DECLARE(be_BLE_run, "", "@i[bi]");
+extern bbool be_BLE_run(struct bvm *vm, uint8_t operation, bbool response, int32_t arg1);
+BE_FUNC_CTYPE_DECLARE(be_BLE_run, "b", "@i[bi]");
 
 extern void be_BLE_store(uint8_t *buf, size_t size);
 BE_FUNC_CTYPE_DECLARE(be_BLE_store, "", "(bytes)~");

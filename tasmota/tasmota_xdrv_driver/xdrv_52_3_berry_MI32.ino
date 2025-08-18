@@ -185,8 +185,8 @@ extern "C" {
     be_raisef(vm, "ble_error", "BLE: could not set characteristic");
   }
 
-  void be_BLE_run(struct bvm *vm, uint8_t operation, bbool response, int32_t arg1);
-  void be_BLE_run(struct bvm *vm, uint8_t operation, bbool response, int32_t arg1){
+  bool be_BLE_run(struct bvm *vm, uint8_t operation, bbool response, int32_t arg1);
+  bool be_BLE_run(struct bvm *vm, uint8_t operation, bbool response, int32_t arg1){
     int32_t argc = be_top(vm); // Get the number of arguments
     bool _response = false;
     if(response){
@@ -197,9 +197,8 @@ extern "C" {
     if(argc == 3){
       ptr_arg1 = &_arg1;
     }
-    if (MI32runBerryConnection(operation, _response, ptr_arg1)) return;
-
-    be_raisef(vm, "ble_error", "BLE: could not run operation");
+    bbool success = MI32runBerryConnection(operation, _response, ptr_arg1);
+    return success;
   }
 
   void be_BLE_adv_watch(struct bvm *vm, uint8_t *buf, size_t size, uint8_t type);

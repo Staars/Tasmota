@@ -34,14 +34,15 @@ class Matter_Plugin_Root : Matter_Plugin
     0x002B: [0,1],                    # Localization Configuration Cluster 11.3 p.580
     0x002C: [0,1,2],                  # Time Format Localization Cluster 11.4 p.581
     0x0030: [0,1,2,3,4],              # GeneralCommissioning cluster 11.9 p.627
-    0x0031: [3,4],                    # Network Commissioning Cluster cluster 11.8 p.606
+    0x0031: [0,1,2,3,4],              # Network Commissioning Cluster cluster 11.8 p.606
     0x0032: [],                       # Diagnostic Logs Cluster 11.10 p.637
     0x0033: [0,1,2,8],                # General Diagnostics Cluster 11.11 p.642
     0x0034: [],                       # Software Diagnostics Cluster 11.12 p.654
     0x0038: [0,1,7],                  # Time Synchronization 11.16 p.689
     0x003C: [0,1,2],                  # Administrator Commissioning Cluster 11.18 p.725
     0x003E: [0,1,2,3,4,5],            # Node Operational Credentials Cluster 11.17 p.704
-    0x003F: []                        # Group Key Management Cluster 11.2 p.572
+    0x003F: [],                        # Group Key Management Cluster 11.2 p.572
+    0x0046: [0,1,2,3,4,6,7]
   })
   # static var CLUSTERS_ICD = matter.consolidate_clusters(_class.CLUSTERS, {
   #   0x0046: [0,1,2]                   # ICD Management Cluster
@@ -684,7 +685,32 @@ class Matter_Plugin_Root : Matter_Plugin
       if   command == 0x0000          #  ---------- DefaultOTAProviders  ----------
         return true                   # OK
       end
-    
+
+    elif cluster == 0x0031              # ========== Network Commissioning Cluster  11.9. ==========
+
+      if   command == 0x0002          #  ---------- AddOrUpdateWiFiNetwork  ----------
+        var ssid = (val.findsubval(0)).asstring()
+        var pass = (val.findsubval(1)).asstring()
+        tasmota.cmd(f"wifitest1 {ssid}+{pass}")
+
+        var ncresp = TLV.Matter_TLV_struct()
+        ncresp.add_TLV(0, TLV.U1, matter.SUCCESS)   # NetworkCommissioningStatusEnum
+        ncresp.add_TLV(1, TLV.UTF2, tasmota.wifi().tostring())     # DebugText
+        ncresp.add_TLV(2, TLV.U1, 1)                # NetworkIndex
+        ctx.command = 0x05              # NetworkConfigResponse
+        return ncresp
+
+    elif   command == 0x0006          #  ---------- ConnectNetwork  ----------
+        import global
+        global.matter_device.start()  # CAN only happen with BLE commissioning, expecting overridden matter.Device
+        
+        var cnresp = TLV.Matter_TLV_struct()
+        cnresp.add_TLV(0, TLV.U1, matter.SUCCESS)   # NetworkCommissioningStatusEnum
+        cnresp.add_TLV(1, TLV.UTF2,tasmota.wifi().tostring())     # DebugText
+        cnresp.add_TLV(2, TLV.I4, 0)                # NetworkIndex
+        ctx.command = 0x07              # ConnectNetworkResponse
+        return cnresp
+      end
     else
       return super(self).invoke_request(session, val, ctx)
     end

@@ -47,7 +47,7 @@ class Matter_Plugin
   # static var TYPES = { <device_type>: <revision> }    # needs to be defined for each endpoint
   # `FEATURE_MAPS` contains any non-zero value per cluster, if not present default to `0`
   static var FEATURE_MAPS = {               # feature map per cluster
-    0x0031: 0x04,                           # Put Eth for now which should work for any on-network
+    0x0031: 0x05,                           # Eth + WiFi - the latter is needed for Bluetooth commissioning
     # 0x0046: 0x04,                           # LITS: LongIdleTimeSupport
     0x0102: 1 + 4,                          # Lift + PA_LF
     0x0202: 2,                              # Fan: Auto

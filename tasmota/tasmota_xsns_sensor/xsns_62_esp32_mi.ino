@@ -66,6 +66,9 @@
 #include <t_bearssl.h>
 
 #include "include/xsns_62_esp32_mi.h"
+#ifdef LOG_LEVEL_DEBUG
+#undef LOG_LEVEL_DEBUG
+#endif
 #include "services/gap/ble_svc_gap.h"
 
 void MI32notifyCB(NimBLERemoteCharacteristic* pRemoteCharacteristic, uint8_t* pData, size_t length, bool isNotify);
