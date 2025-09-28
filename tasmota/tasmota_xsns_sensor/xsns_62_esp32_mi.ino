@@ -2417,18 +2417,26 @@ bool MI32HandleWebGUIResponse(void){
   }
   char tmp[16];
   WebGetArg(PSTR("wi"), tmp, sizeof(tmp));
-  if (!tmp[0]) return false;
-    WSContentBegin(200, CT_PLAIN);
-    uint32_t slot = MI32.widgetSlot;
-    if (slot) {
-      uint32_t i = __builtin_ctz(slot);        // index of first set bit
-      MI32sendWidget(i);
-      MI32.widgetSlot &= ~(1UL << i);          // clear that bit
-    } else {
-      MI32sendBerryWidget();
-    }
-    WSContentEnd();
+  if (!tmp[0]) {
+    return false;
+  }
+
+  if (atoi(tmp) == 0) {
+    MI32ServeStaticPage();
     return true;
+  }
+
+  WSContentBegin(200, CT_PLAIN);
+  uint32_t slot = MI32.widgetSlot;
+  if (slot) {
+    uint32_t i = __builtin_ctz(slot);        // index of first set bit
+    MI32sendWidget(i);
+    MI32.widgetSlot &= ~(1UL << i);          // clear that bit
+  } else {
+    MI32sendBerryWidget();
+  }
+  WSContentEnd();
+  return true;
 }
 
 #ifdef USE_MI_ESP32_ENERGY
@@ -2445,29 +2453,32 @@ float MI32ln(float x) {
 }
 #endif //USE_MI_ESP32_ENERGY
 
-void MI32createPolyline(char *polyline, uint8_t *history){
-  uint32_t _pos = 0;
-  uint32_t _inc = 0;
-  for (uint32_t i = 0; i<24;i++){
-    uint32_t y = 21-MI32fetchHistory(history,i);
-    if (y>20){
-      y = 150; //create a big gap in the graph to represent invalidated data
-    }
-    _inc = snprintf_P(polyline+_pos,10,PSTR("%u,%u "),i*6,y);
-    _pos+=_inc;
+void MI32createGraph(char *buffer, uint8_t *history, uint8_t r, uint8_t g, uint8_t b) {
+  constexpr size_t bufferSize = 256; // assuming this is your buffer size
+  uint32_t pos = 0;
+  uint16_t w = 150;
+  uint16_t h = 20;
+  // Check remaining buffer space before each write
+  if (pos < bufferSize - 50) {
+    pos += snprintf_P(buffer + pos, bufferSize - pos, PSTR("{graph:w=%u,h=%u,color(%u,%u,%u),"), w, h, r, g, b);
   }
-      // AddLog(LOG_LEVEL_DEBUG,PSTR("M32: polyline: %s"),polyline);
+  for (uint32_t i = 0; i < 24 && pos < bufferSize - 20; i++) {
+    if (i > 0) pos += snprintf_P(buffer + pos, bufferSize - pos, PSTR(","));
+    uint8_t value = MI32fetchHistory(history, i);
+    pos += snprintf_P(buffer + pos, bufferSize - pos, PSTR("%d"), value);
+  }
+  if (pos < bufferSize - 2) {
+    pos += snprintf_P(buffer + pos, bufferSize - pos, PSTR("}"));
+  }
 }
 
 #ifdef USE_MI_ESP32_ENERGY
 void MI32sendEnergyWidget(){
   if (Energy->current_available && Energy->voltage_available) {
     WSContentSend_P(HTTP_MI32_POWER_WIDGET,MIBLEsensors.size()+1, Energy->voltage,Energy->current[1]);
-    char _polyline[176];
-    MI32createPolyline(_polyline,MI32.energy_history);
-    WSContentSend_P(PSTR("<p>" D_POWERUSAGE ": %.1f " D_UNIT_WATT ""),Energy->active_power);
-    WSContentSend_P(HTTP_MI32_GRAPH,_polyline,185,124,124,_polyline,1);
-    WSContentSend_P(PSTR("</p></div>"));
+    char _graph[256];
+    MI32createGraph(_graph, MI32.energy_history, 185, 124, 124);
+    WSContentSend_P(PSTR("<p>" D_POWERUSAGE ": %.1f " D_UNIT_WATT "%s</p></div>"), Energy->active_power, _graph);
   }
 }
 #endif //USE_MI_ESP32_ENERGY
@@ -2524,18 +2535,14 @@ void MI32sendWidget(uint32_t slot){
 
   if(_sensor.feature.temp == 1 && _sensor.feature.hum == 1){
     if(!isnan(_sensor.temp)){
-      char _polyline[176];
-      MI32createPolyline(_polyline,_sensor.temp_history);
-      WSContentSend_P(PSTR("<p>" D_JSON_TEMPERATURE ": %.1f °C"),_sensor.temp);
-      WSContentSend_P(HTTP_MI32_GRAPH,_polyline,185,124,124,_polyline,1);
-      WSContentSend_P(PSTR("</p>"));
+      char _graph[256];
+      MI32createGraph(_graph, _sensor.temp_history, 185, 124, 124);
+      WSContentSend_P(PSTR("<p>" D_JSON_TEMPERATURE ": %.1f °C%s</p>"), _sensor.temp, _graph);
     }
     if(!isnan(_sensor.hum)){
-      char _polyline[176];
-      MI32createPolyline(_polyline,_sensor.hum_history);
-      WSContentSend_P(PSTR("<p>" D_JSON_HUMIDITY ": %.1f %%"),_sensor.hum);
-      WSContentSend_P(HTTP_MI32_GRAPH,_polyline,151,190,216,_polyline,2);
-      WSContentSend_P(PSTR("</p>"));
+      char _graph[256];
+      MI32createGraph(_graph, _sensor.hum_history, 151, 190, 216);
+      WSContentSend_P(PSTR("<p>" D_JSON_HUMIDITY ": %.1f %%%s</p>"), _sensor.hum, _graph);
     }
     if(!isnan(_sensor.temp) && !isnan(_sensor.hum)){
       WSContentSend_P(PSTR("" D_JSON_DEWPOINT ": %.1f °C"),CalcTempHumToDew(_sensor.temp,_sensor.hum));
@@ -2543,20 +2550,16 @@ void MI32sendWidget(uint32_t slot){
   }
   else if(_sensor.feature.temp == 1){
     if(!isnan(_sensor.temp)){
-      char _polyline[176];
-      MI32createPolyline(_polyline,_sensor.temp_history);
-      WSContentSend_P(PSTR("<p>" D_JSON_TEMPERATURE ": %.1f °C"),_sensor.temp);
-      WSContentSend_P(HTTP_MI32_GRAPH,_polyline,185,124,124,_polyline,1);
-      WSContentSend_P(PSTR("</p>"));
+      char _graph[256];
+      MI32createGraph(_graph, _sensor.temp_history, 185, 124, 124);
+      WSContentSend_P(PSTR("<p>" D_JSON_TEMPERATURE ": %.1f °C%s</p>"), _sensor.temp, _graph);
     }
   }
   if(_sensor.feature.lux == 1){
     if(_sensor.lux!=0x00ffffff){
-      char _polyline[176];
-      MI32createPolyline(_polyline,_sensor.lux_history);
-      WSContentSend_P(PSTR("<p>" D_JSON_ILLUMINANCE ": %d Lux"),_sensor.lux);
-      WSContentSend_P(HTTP_MI32_GRAPH,_polyline,242,240,176,_polyline,3);
-      WSContentSend_P(PSTR("</p>"));
+      char _graph[256];
+      MI32createGraph(_graph, _sensor.lux_history, 242, 240, 176);
+      WSContentSend_P(PSTR("<p>" D_JSON_ILLUMINANCE ": %d Lux%s</p>"), _sensor.lux, _graph);
     }
   }
   if(_sensor.feature.knob == 1){
@@ -2599,12 +2602,10 @@ void MI32sendWidget(uint32_t slot){
   if(_sensor.feature.payload == 1){
     if(_sensor.payload != nullptr){
       char _payload[128];
-      char _polyline[176];
+      char _graph[256]; // bigger buffer, since we now hold 24 values + color
       ToHex_P((const unsigned char*)_sensor.payload,_sensor.payload_len,_payload, (_sensor.payload_len * 2) + 1);
-      MI32createPolyline(_polyline,_sensor.temp_history);
-      WSContentSend_P(PSTR("<p>Payload:"));
-      WSContentSend_P(HTTP_MI32_GRAPH,_polyline,60,240,176,_polyline,4);
-      WSContentSend_P(PSTR("</p><code style='word-break: break-all;'>%s</code>"),_payload);
+      MI32createGraph(_graph, _sensor.temp_history, 60, 240, 176);
+      WSContentSend_P(PSTR("<p>Payload:%s</p><code>%s</code>"),_graph,_payload);
     }
   }
   WSContentSend_P(PSTR("<p>Timestamp: %s</p>"),GetDT(_sensor.lastTime).c_str());
@@ -2614,32 +2615,19 @@ void MI32sendWidget(uint32_t slot){
 void MI32InitGUI(void){
   MI32.widgetSlot=0;
   WSContentStart_P("m32");
-  WSContentSend_P(HTTP_MI32_SCRIPT_1);
+  WSContentSend_P(HTTP_MI32_BOOTSTRAP);
   WSContentSendStyle();
-  WSContentSend_P(HTTP_MI32_STYLE);
-  WSContentSend_P(HTTP_MI32_STYLE_SVG,1,185,124,124,185,124,124);
-  WSContentSend_P(HTTP_MI32_STYLE_SVG,2,151,190,216,151,190,216);
-  WSContentSend_P(HTTP_MI32_STYLE_SVG,3,242,240,176,242,240,176);
-  WSContentSend_P(HTTP_MI32_STYLE_SVG,4,60,240,176,60,240,176);
-
-  char _role[16];
-  GetTextIndexed(_role, sizeof(_role), MI32.role, HTTP_MI32_PARENT_BLE_ROLE);
-  WSContentSend_P((HTTP_MI32_PARENT_START),MIBLEsensors.size(),UpTime(),ESP.getFreeHeap()/1024,_role);
-
-  uint32_t _slot;
-  for(_slot = 0;_slot<MIBLEsensors.size();_slot++){
-    MI32sendWidget(_slot);
-  }
-
-#ifdef USE_MI_ESP32_ENERGY
-  MI32sendEnergyWidget();
-#endif //USE_MI_ESP32_ENERGY
-#ifdef USE_WEBCAM
-  MI32sendCamWidget();
-#endif //USE_WEBCAM
-  WSContentSend_P(PSTR("</div>"));
+  WSContentSend_P("<div id='m'></div>");
   WSContentSpaceButton(BUTTON_MAIN);
   WSContentStop();
+}
+
+void MI32ServeStaticPage(void) {
+  Webserver->sendHeader(F("Content-Encoding"), F("gzip")); // tell browser to decompress
+  Webserver->sendHeader(F("Cache-Control"), F("public, max-age=31536000")); // long cache
+  // Webserver->setContentLength(MI32_STATIC_PAGE_len); // exact length
+  Webserver->send_P(200, PSTR("text/html"), MI32_STATIC_PAGE, MI32_STATIC_PAGE_len);
+  Webserver->client().stop();
 }
 
 void MI32HandleWebGUI(void){
