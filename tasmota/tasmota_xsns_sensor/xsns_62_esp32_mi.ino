@@ -961,6 +961,8 @@ extern "C" {
       WSContentSend(be_MI32Widget.data, be_MI32Widget.size);
       be_MI32Widget.data = nullptr;
       be_MI32Widget.size = 0;
+    } else {
+      WSContentSend_P("");
     }
   }
 
@@ -2454,21 +2456,32 @@ float MI32ln(float x) {
 #endif //USE_MI_ESP32_ENERGY
 
 void MI32createGraph(char *buffer, uint8_t *history, uint8_t r, uint8_t g, uint8_t b) {
-  constexpr size_t bufferSize = 256; // assuming this is your buffer size
+  constexpr size_t bufferSize = 256;  // total size of buffer
   uint32_t pos = 0;
   uint16_t w = 150;
   uint16_t h = 20;
-  // Check remaining buffer space before each write
-  if (pos < bufferSize - 50) {
-    pos += snprintf_P(buffer + pos, bufferSize - pos, PSTR("{graph:w=%u,h=%u,color(%u,%u,%u),"), w, h, r, g, b);
+  // Start compact DSL for a single-series histogram: "{h,width,height,(r,g,b):"
+  if (pos < bufferSize - 20) {
+    pos += snprintf_P(buffer + pos, bufferSize - pos,
+                      PSTR("{h,%u,%u,(%u,%u,%u):"),
+                      w, h, r, g, b);
   }
-  for (uint32_t i = 0; i < 24 && pos < bufferSize - 20; i++) {
-    if (i > 0) pos += snprintf_P(buffer + pos, bufferSize - pos, PSTR(","));
+
+  // Emit 24 history values separated by commas
+  for (uint8_t i = 0; i < 24 && pos < bufferSize - 10; i++) {
     uint8_t value = MI32fetchHistory(history, i);
-    pos += snprintf_P(buffer + pos, bufferSize - pos, PSTR("%d"), value);
+    if (i > 0 && pos < bufferSize - 1) {
+      buffer[pos++] = ',';      // add comma
+      buffer[pos]   = '\0';
+    }
+    pos += snprintf_P(buffer + pos, bufferSize - pos,
+                      PSTR("%u"),
+                      value);
   }
+  // Close the DSL block "}"
   if (pos < bufferSize - 2) {
-    pos += snprintf_P(buffer + pos, bufferSize - pos, PSTR("}"));
+    pos += snprintf_P(buffer + pos, bufferSize - pos,
+                      PSTR("}"));
   }
 }
 
@@ -2623,9 +2636,8 @@ void MI32InitGUI(void){
 }
 
 void MI32ServeStaticPage(void) {
-  Webserver->sendHeader(F("Content-Encoding"), F("gzip")); // tell browser to decompress
-  Webserver->sendHeader(F("Cache-Control"), F("public, max-age=31536000")); // long cache
-  // Webserver->setContentLength(MI32_STATIC_PAGE_len); // exact length
+  Webserver->sendHeader(F("Content-Encoding"), F("gzip"));
+  Webserver->sendHeader(F("Cache-Control"), F("no-store, no-cache, must-revalidate, max-age=0"));
   Webserver->send_P(200, PSTR("text/html"), MI32_STATIC_PAGE, MI32_STATIC_PAGE_len);
   Webserver->client().stop();
 }
