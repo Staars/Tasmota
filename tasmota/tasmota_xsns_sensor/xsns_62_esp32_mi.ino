@@ -2615,7 +2615,7 @@ void MI32sendWidget(uint32_t slot){
   if(_sensor.feature.payload == 1){
     if(_sensor.payload != nullptr){
       char _payload[128];
-      char _graph[256]; // bigger buffer, since we now hold 24 values + color
+      char _graph[256];
       ToHex_P((const unsigned char*)_sensor.payload,_sensor.payload_len,_payload, (_sensor.payload_len * 2) + 1);
       MI32createGraph(_graph, _sensor.temp_history, 60, 240, 176);
       WSContentSend_P(PSTR("<p>Payload:%s</p><code>%s</code>"),_graph,_payload);
@@ -2639,7 +2639,6 @@ void MI32ServeStaticPage(void) {
   Webserver->sendHeader(F("Content-Encoding"), F("gzip"));
   Webserver->sendHeader(F("Cache-Control"), F("no-store, no-cache, must-revalidate, max-age=0"));
   Webserver->send_P(200, PSTR("text/html"), MI32_STATIC_PAGE, MI32_STATIC_PAGE_len);
-  Webserver->client().stop();
 }
 
 void MI32HandleWebGUI(void){
