@@ -957,12 +957,33 @@ extern "C" {
   }
 
   void MI32sendBerryWidget() {
+    static uint32_t lastMetricsTime = 0;
     if(be_MI32Widget.size != 0) {
       WSContentSend(be_MI32Widget.data, be_MI32Widget.size);
       be_MI32Widget.data = nullptr;
       be_MI32Widget.size = 0;
     } else {
-      WSContentSend_P("");
+      uint32_t now = millis();
+      if (now - lastMetricsTime >= 10000) {
+        lastMetricsTime = now;
+        char metricsBuf[64];
+        // Fields: RSSI (dBm), Channel, PHY Mode, Free Heap (bytes), Total Heap (bytes), Heap Fragmentation (%), PSRAM Total (bytes), PSRAM Free (bytes), Uptime (sec), MI32.role, BLE Sensors Count
+        snprintf(metricsBuf, sizeof(metricsBuf),
+          "%i,%u,%u,%d,%d,%d,%d,%d,%d,%d,%d",
+          WiFi.RSSI(),
+          WiFi.channel(),
+          WiFiHelper::getPhyMode(),
+          ESP.getFreeHeap(),
+          ESP.getHeapSize(),
+          ESP_getHeapFragmentation(),
+          ESP.getPsramSize(),
+          ESP.getFreePsram(),
+          UpTime(),
+          MI32.role,
+          MIBLEsensors.size()
+        );
+        WSContentSend(metricsBuf, 64);
+      }
     }
   }
 
@@ -2636,7 +2657,7 @@ void MI32InitGUI(void){
 }
 
 void MI32ServeStaticPage(void) {
-  Webserver->sendHeader(F("Content-Encoding"), F("gzip"));
+  Webserver->sendHeader(F("Content-Encoding"), F("br"));
   Webserver->sendHeader(F("Cache-Control"), F("no-store, no-cache, must-revalidate, max-age=0"));
   Webserver->send_P(200, PSTR("text/html"), MI32_STATIC_PAGE, MI32_STATIC_PAGE_len);
 }
