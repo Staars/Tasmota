@@ -565,44 +565,54 @@ void MI32triggerTele(void){
 
 #ifdef USE_MI_EXT_GUI
 /**
- * @brief Saves a sensor value mapped to the graph range of 0-20 pixel, this function automatically reads the actual hour from system time
+ * @brief Saves a sensor value mapped to the graph range of 0–127.
+ *        This function automatically reads the actual hour from system time.
  *
- * @param history - pointer to uint8_t[23]
- * @param value - value as float, this
- * @param type  - internal type. for BLE: 0 - temperature, 1 - humidity, 2 - illuminance, for internal sensors: 100 - wattage
+ * @param history - pointer to uint8_t[24]
+ * @param value   - sensor value as int
+ * @param type    - internal type. for BLE: 0 - temperature, 1 - humidity,
+ *                  2 - illuminance, 3 - BLE sightings,
+ *                  for internal sensors: 100 - wattage
  */
-void MI32addHistory(uint8_t history[24], float value, const uint32_t type){
-  const uint32_t _hour = (LocalTime()%SECS_PER_DAY)/SECS_PER_HOUR;
-  // AddLog(LOG_LEVEL_DEBUG,PSTR("M32: history hour: %u"),_hour);
-  switch(type){
-    case 0:  //temperature
-      history[_hour] = ((((value + 5.0f)/4) + 1) + 0b10000000); //temp
+void MI32addHistory(uint8_t history[24], int value, const uint32_t type) {
+  const uint32_t _hour = (LocalTime() % SECS_PER_DAY) / SECS_PER_HOUR;
+  uint8_t scaled = 0;
+
+  switch (type) {
+    case 0: { // temperature, -20..60 °C
+      scaled = changeIntScale((int16_t)value, -20, 60, 1, 127);
       break;
-    case 1: //humidity
-      history[_hour] = (((value/5.0f) + 1) + 0b10000000) ; //hum
+    }
+    case 1: { // humidity, 0..100 %
+      scaled = changeIntScale((int16_t)value, 0, 100, 1, 127);
       break;
-    case 2: //light
-      if(value>100.0f) value=100.0f; //clamp it for now
-      history[_hour] = (((value/5.0f) + 1) + 0b10000000); //lux
-      // AddLog(LOG_LEVEL_DEBUG,PSTR("M32: history lux: %u in hour:%u"),history[_hour], _hour);
+    }
+    case 2: { // light, 0..1000 lux
+      scaled = changeIntScale((int16_t)value, 0, 1000, 1, 127);
       break;
-    case 3: //BLE device sighting
-      uint16_t sightings = history[_hour] & 0b01111111;
-      if(sightings<20){
-        history[_hour] = (sightings | 0b10000000) + 1;
-        // AddLog(LOG_LEVEL_DEBUG,PSTR("M32: history sighting: %u in hour:%u"),history[_hour], _hour);
+    }
+    case 3: { // BLE sightings, count up to 127
+      uint8_t sightings = history[_hour] & 0x7F;
+      if (sightings < 127) {
+        scaled = sightings + 1;
+      } else {
+        scaled = 127;
       }
       break;
+    }
 #ifdef USE_MI_ESP32_ENERGY
-    case 100: // energy
-      if(value == 0.0f) value = 1.0f;
-      const uint8_t _watt = ((MI32ln(value)*2) + 0b10000000); //watt
-      history[_hour] = _watt;
-      // AddLog(LOG_LEVEL_DEBUG,PSTR("M32: history energy: %u for value:%u"),history[_hour], value); //still playing with the mapping
+    case 100: { // energy/wattage, logarithmic mapping
+      if (value <= 0) value = 1;
+      int16_t lnval = MI32ln(value);
+      scaled = changeIntScale(lnval, 0, 64, 1, 127);
       break;
-#endif //USE_MI_ESP32_ENERGY
+    }
+#endif
   }
+  // Set MSB to mark “valid datapoint”
+  history[_hour] = (scaled & 0x7F) | 0x80;
 }
+
 
 /**
  * @brief Returns a value between 0-21 for use as a data point in the history graph of the extended web UI
@@ -611,11 +621,13 @@ void MI32addHistory(uint8_t history[24], float value, const uint32_t type){
  * @param hour  - hour of datapoint
  * @return uint8_t  - value for the y-axis, should be between 0-21
  */
-uint8_t MI32fetchHistory(uint8_t history[24], uint32_t hour){
-    if((hour>23 || bitRead(history[hour],7)) == 0) {
-      return 0; //invalidated data
-    }
-    return (history[hour]) - 0b10000000;
+uint8_t MI32fetchHistory(uint8_t history[24], uint32_t hour) {
+  if (hour > 23) return 0;
+  uint8_t v = history[hour];
+  if ((v & 0x80) == 0) {
+    return 0; // no data received
+  }
+  return v & 0x7F; // strip MSB, return 1..127
 }
 
 /**
@@ -1844,7 +1856,7 @@ if(decryptRet!=0){
       }
       MIBLEsensors[_slot].eventType.lux  = 1;
 #ifdef USE_MI_EXT_GUI
-      MI32addHistory(MIBLEsensors[_slot].lux_history, (float)MIBLEsensors[_slot].lux, 2);
+      MI32addHistory(MIBLEsensors[_slot].lux_history, MIBLEsensors[_slot].lux, 2);
 #endif //USE_MI_EXT_GUI
       // AddLog(LOG_LEVEL_DEBUG,PSTR("Mode 7: U24: %u Lux"), _payload.lux & 0x00ffffff);
     break;
@@ -1902,7 +1914,7 @@ if(decryptRet!=0){
       MIBLEsensors[_slot].NMT = 0;
       MI32.mode.shallTriggerTele = 1;
 #ifdef USE_MI_EXT_GUI
-      MI32addHistory(MIBLEsensors[_slot].lux_history, (float)MIBLEsensors[_slot].lux, 2);
+      MI32addHistory(MIBLEsensors[_slot].lux_history, MIBLEsensors[_slot].lux, 2);
 #endif //USE_MI_EXT_GUI
       // AddLog(LOG_LEVEL_DEBUG,PSTR("motion: primary"),MIBLEsensors[_slot].lux );
     break;
@@ -2073,8 +2085,8 @@ void MI32ParseATCPacket(char * _buf, uint32_t length, uint8_t addr[6], int RSSI)
   MIBLEsensors[_slot].eventType.bat  = 1;
 #ifdef USE_MI_EXT_GUI
   bitSet(MI32.widgetSlot,_slot);
-  MI32addHistory(MIBLEsensors[_slot].temp_history, (float)MIBLEsensors[_slot].temp, 0);
-  MI32addHistory(MIBLEsensors[_slot].hum_history, (float)MIBLEsensors[_slot].hum, 1);
+  MI32addHistory(MIBLEsensors[_slot].temp_history, MIBLEsensors[_slot].temp, 0);
+  MI32addHistory(MIBLEsensors[_slot].hum_history, MIBLEsensors[_slot].hum, 1);
 #endif //USE_MI_EXT_GUI
   MIBLEsensors[_slot].shallSendMQTT = 1;
   if(MI32.option.directBridgeMode == 1) MI32.mode.shallTriggerTele = 1;
@@ -2097,7 +2109,7 @@ void MI32parseCGD1Packet(char * _buf, uint32_t length, uint8_t addr[6], int RSSI
           MIBLEsensors[_slot].eventType.temp  = 1;
           DEBUG_SENSOR_LOG(PSTR("CGD1: temp updated"));
 #ifdef USE_MI_EXT_GUI
-          MI32addHistory(MIBLEsensors[_slot].temp_history, (float)MIBLEsensors[_slot].temp, 0);
+          MI32addHistory(MIBLEsensors[_slot].temp_history, MIBLEsensors[_slot].temp, 0);
 #endif //USE_MI_EXT_GUI
       }
       _tempFloat=(float)(_packet.hum)/10.0f;
@@ -2106,7 +2118,7 @@ void MI32parseCGD1Packet(char * _buf, uint32_t length, uint8_t addr[6], int RSSI
           MIBLEsensors[_slot].eventType.hum  = 1;
           DEBUG_SENSOR_LOG(PSTR("CGD1: hum updated"));
 #ifdef USE_MI_EXT_GUI
-          MI32addHistory(MIBLEsensors[_slot].hum_history, (float)MIBLEsensors[_slot].hum, 1);
+          MI32addHistory(MIBLEsensors[_slot].hum_history, MIBLEsensors[_slot].hum, 1);
 #endif //USE_MI_EXT_GUI
       }
       DEBUG_SENSOR_LOG(PSTR("CGD1: U16:  %x Temp U16: %x Hum"), _packet.temp,  _packet.hum);
@@ -2187,7 +2199,7 @@ void MI32HandleEveryDevice(const NimBLEAdvertisedDevice* advertisedDevice, uint8
       memcpy(_sensor.payload, advertisedDevice->getPayload().data(), advertisedDevice->getPayload().size());
       _sensor.payload_len = advertisedDevice->getPayload().size();
       bitSet(MI32.widgetSlot,_slot);
-      MI32addHistory(_sensor.temp_history, 0.0f, 3); // reuse temp_history as sighting history
+      MI32addHistory(_sensor.temp_history, 0, 3); // reuse temp_history as sighting history
       _sensor.RSSI=RSSI;
       _sensor.feature.payload = 1;
       _sensor.eventType.payload = 1;
@@ -2463,16 +2475,9 @@ bool MI32HandleWebGUIResponse(void){
 }
 
 #ifdef USE_MI_ESP32_ENERGY
-//https://gist.github.com/LingDong-/7e4c4cae5cbbc44400a05fba65f06f23
-// used for logarithmic mapping of 0 - 3600 watts to 0-20 pixel - TaylorLog did not work as expected
-float MI32ln(float x) {
-  unsigned int bx = * (unsigned int *) (&x);
-  unsigned int ex = bx >> 23;
-  signed int t = (signed int)ex-(signed int)127;
-  unsigned int s = (t < 0) ? (-t) : t;
-  bx = 1065353216 | (bx & 8388607);
-  x = * (float *) (&bx);
-  return -1.49278+(2.11263+(-0.729104+0.10969*x)*x)*x+0.6931471806*t;
+// ultra simple integer log2 using builtin CLZ
+int MI32ln(uint32_t x) {
+  return 31 - __builtin_clz(v);
 }
 #endif //USE_MI_ESP32_ENERGY
 
@@ -2657,7 +2662,7 @@ void MI32InitGUI(void){
 }
 
 void MI32ServeStaticPage(void) {
-  Webserver->sendHeader(F("Content-Encoding"), F("br"));
+  Webserver->sendHeader(F("Content-Encoding"), F("gzip"));
   Webserver->sendHeader(F("Cache-Control"), F("no-store, no-cache, must-revalidate, max-age=0"));
   Webserver->send_P(200, PSTR("text/html"), MI32_STATIC_PAGE, MI32_STATIC_PAGE_len);
 }
