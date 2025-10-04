@@ -969,7 +969,7 @@ extern "C" {
   }
 
   void MI32sendBerryWidget() {
-    static uint32_t lastMetricsTime = 0;
+    static uint32_t lastMetricsTime = UINT32_MAX; //we want an overlow in the first run
     if(be_MI32Widget.size != 0) {
       WSContentSend(be_MI32Widget.data, be_MI32Widget.size);
       be_MI32Widget.data = nullptr;
