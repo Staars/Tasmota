@@ -2671,6 +2671,8 @@ void MI32HandleWebGUI(void){
   if (!HttpCheckPriviledgedAccess()) { return; }
   if (MI32HandleWebGUIResponse()) { return; }
   MI32InitGUI();
+  size_t n = MIBLEsensors.size();
+  MI32.widgetSlot = ((1u << n) - 1);
 }
 #endif //USE_MI_EXT_GUI
 
