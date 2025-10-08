@@ -126,7 +126,7 @@ static inline uint32_t get_timestamp_ms() {
 
 // CSI Descriptor Structure
 struct TFL_csi_descriptor_t {
-    uint8_t sample_rate;       // Packets per second (1-100)
+    uint8_t sample_rate;       // Packets per second (0-100)
     uint8_t feature_mode;      // 0=RAW, 1=LIGHT
     uint8_t use_quantization;  // Quantize for TFLite
     uint8_t training_mode;     // Enable training data output
@@ -538,29 +538,40 @@ bool TFL_init_CSI(const uint8_t* descriptor) {
         goto error_cleanup;
     }
 
-    // Setup ping using Espressif ping_sock API
-    TFL->csi->ping_config = ESP_PING_DEFAULT_CONFIG();
-    TFL->csi->ping_config.target_addr = TFL->csi->target_addr;
-    TFL->csi->ping_config.count = 0;  // infinite pings
-    TFL->csi->ping_config.interval_ms = 1000 / csi_desc->sample_rate;
-    TFL->csi->ping_config.timeout_ms = 1000;
-    TFL->csi->ping_config.task_stack_size = 2048;
-    TFL->csi->ping_config.task_prio = 2;
+    // Setup ping using Espressif ping_sock API only if sample_rate > 0
+    if (csi_desc->sample_rate > 0) {
+        TFL->csi->ping_config = ESP_PING_DEFAULT_CONFIG();
+        TFL->csi->ping_config.target_addr = TFL->csi->target_addr;
+        TFL->csi->ping_config.count = 0;  // infinite pings
+        TFL->csi->ping_config.interval_ms = 1000 / csi_desc->sample_rate;
+        TFL->csi->ping_config.timeout_ms = 1000;
+        TFL->csi->ping_config.task_stack_size = 2048;
+        TFL->csi->ping_config.task_prio = 2;
 
-    esp_ping_callbacks_t cbs;
-    cbs.on_ping_success = NULL;  // No action needed on ping success
-    cbs.on_ping_timeout = NULL;  // No action needed on ping timeout  
-    cbs.on_ping_end = NULL;      // No action needed on ping end
-    cbs.cb_args = TFL->csi;
+        esp_ping_callbacks_t cbs;
+        cbs.on_ping_success = NULL;
+        cbs.on_ping_timeout = NULL;  
+        cbs.on_ping_end = NULL;
+        cbs.cb_args = TFL->csi;
 
-    err = esp_ping_new_session(&TFL->csi->ping_config, &cbs, &TFL->csi->ping_handle);
-    if (err != ESP_OK) {
-        AddLog(LOG_LEVEL_ERROR, PSTR("TFL: Ping session creation failed: 0x%x"), err);
-        goto error_cleanup;
+        err = esp_ping_new_session(&TFL->csi->ping_config, &cbs, &TFL->csi->ping_handle);
+        if (err != ESP_OK) {
+            AddLog(LOG_LEVEL_ERROR, PSTR("TFL: Ping session creation failed: 0x%x"), err);
+            goto error_cleanup;
+        }
+
+        // Start pinging
+        err = esp_ping_start(TFL->csi->ping_handle);
+        if (err != ESP_OK) {
+            AddLog(LOG_LEVEL_ERROR, PSTR("TFL: Ping start failed: 0x%x"), err);
+            goto error_cleanup;
+        }
+        
+        AddLog(LOG_LEVEL_INFO, PSTR("TFL: Internal ping enabled with interval %dms"), TFL->csi->ping_config.interval_ms);
+    } else {
+        TFL->csi->ping_handle = nullptr;
+        AddLog(LOG_LEVEL_INFO, PSTR("TFL: Internal ping disabled - relying on external network traffic"));
     }
-
-    // Start pinging
-    err = esp_ping_start(TFL->csi->ping_handle);
 
     // Create mutex
     TFL->csi->buffer_mutex = xSemaphoreCreateMutex();
@@ -634,6 +645,11 @@ error_cleanup:
     esp_wifi_set_csi_rx_cb(NULL, NULL);
     esp_wifi_set_promiscuous(false);
     TFL->stats = nullptr;
+    if (TFL->csi->ping_handle) {
+        esp_ping_stop(TFL->csi->ping_handle);
+        esp_ping_delete_session(TFL->csi->ping_handle);
+        TFL->csi->ping_handle = nullptr;
+    }
     
     if (TFL->csi) {
         if (TFL->csi->buffer_mutex) {
@@ -1492,7 +1508,7 @@ extern "C" {
           pos += inc;
       }
 
-  #ifdef USE_TF_LITE_CSI
+#ifdef USE_TF_LITE_CSI
       // Comprehensive CSI statistics
       if(TFL->option.use_csi == 1){
           inc = snprintf_P(s + pos, size - pos, PSTR("\"csi\":{"));
@@ -1509,9 +1525,10 @@ extern "C" {
               pos += inc;
               
               inc = snprintf_P(s + pos, size - pos, 
-                  PSTR("\"feature_size\":%u,\"buffer_size\":%u,\"capturing\":%s"),
+                  PSTR("\"feature_size\":%u,\"buffer_size\":%u,\"capturing\":%s,\"internal_ping\":%s"),
                   TFL->csi->feature_size, TFL->csi->feature_buffer_size,
-                  TFL->csi->capturing ? "true" : "false");
+                  TFL->csi->capturing ? "true" : "false",
+                  TFL->csi->ping_handle ? "true" : "false");
               if (inc < 0 || (pos + inc) >= size) goto buffer_overflow;
               pos += inc;
           } else {
@@ -1524,7 +1541,7 @@ extern "C" {
           if (inc < 0 || (pos + inc) >= size) goto buffer_overflow;
           pos += inc;
       }
-  #endif
+#endif
 
       // Performance metrics
       inc = snprintf_P(s + pos, size - pos, PSTR("\"performance\":{\"max_invocations_sec\":%u}}"), TFL->max_invocations);
