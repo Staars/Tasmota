@@ -1,5 +1,6 @@
 /*
   xdrv_52_3_tf_lite_micro.ino - Berry scripting language, High-Level Tensor Flow Lite for Microprocessors model deployer
+  Now with CSI (Channel State Information) support
 
   Copyright (C) 2022 Christian Baars & Stephan Hadinger, Berry language by Guan Wenliang https://github.com/Skiars/berry
 
@@ -16,7 +17,6 @@
   You should have received a copy of the GNU General Public License
   along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
-
 
 #ifdef USE_BERRY
 
@@ -37,6 +37,25 @@
 #ifdef USE_I2S
 #include "mfcc.h"
 #endif //USE_I2S
+
+#ifdef USE_TF_LITE_CSI
+#include "esp_wifi.h"
+#include "esp_log.h"
+#include "freertos/portmacro.h"
+#include "ping/ping_sock.h"
+
+// Check SOC support for CSI
+#if CONFIG_IDF_TARGET_ESP32 || CONFIG_IDF_TARGET_ESP32S2 || CONFIG_IDF_TARGET_ESP32S3 || CONFIG_IDF_TARGET_ESP32C3
+  #define CSI_SUPPORTED 1
+#elif CONFIG_IDF_TARGET_ESP32C2
+  #define CSI_SUPPORTED 0
+  #warning "ESP32-C2 does not support WiFi CSI"
+#else
+  #define CSI_SUPPORTED 0
+  #warning "Unknown ESP32 variant - CSI support uncertain"
+#endif
+
+#endif // USE_TF_LITE_CSI
 
 /*********************************************************************************************\
  * Internal helper classes and constants
@@ -99,6 +118,40 @@ struct TFL_mic_ctx_t{
 
 #endif //USE_I2S
 
+#ifdef USE_TF_LITE_CSI
+// --- Timestamp helpers ---
+static inline uint32_t get_timestamp_ms() {
+    return (uint32_t)(esp_timer_get_time() / 1000); // ms since boot
+}
+
+// CSI Descriptor Structure
+struct TFL_csi_descriptor_t {
+    uint8_t sample_rate;       // Packets per second (1-100)
+    uint8_t feature_mode;      // 0=RAW, 1=LIGHT
+    uint8_t use_quantization;  // Quantize for TFLite
+    uint8_t training_mode;     // Enable training data output
+    uint8_t max_invocations;   // Max inferences per second
+};
+
+// CSI Context Structure
+struct TFL_csi_ctx_t {
+    volatile bool capturing;                    // volatile for thread-safety
+    volatile uint32_t packets_received;         // atomic counter
+    volatile uint32_t packets_dropped;          // atomic counter
+    int8_t* feature_buffer;
+    int feature_buffer_size;
+    volatile int feature_buffer_idx;            // atomic index
+    int feature_size;
+    TFL_csi_descriptor_t config;
+    SemaphoreHandle_t buffer_mutex;             // mutex for buffer access
+
+    esp_ping_handle_t ping_handle;
+    esp_ping_config_t ping_config;
+    ip_addr_t target_addr;
+};
+
+#endif // USE_TF_LITE_CSI
+
 struct TFL_stats_t{
   uint32_t model_size = 0;
   uint32_t used_arena_bytes = 0;
@@ -129,18 +182,518 @@ union{
     uint32_t unread_output:1;
     uint32_t new_input_data:1;
     uint32_t use_mic:1;
+    uint32_t use_csi:1;
     } option;
     uint32_t options;
 };
 #ifdef USE_I2S
 TFL_mic_ctx_t *mic = nullptr;
 #endif // USE_I2S
+#ifdef USE_TF_LITE_CSI
+TFL_csi_ctx_t *csi = nullptr;
+#endif // USE_TF_LITE_CSI
 TFL_stats_t *stats = nullptr;
 };
 
 TFL_ctx_t *TFL = nullptr;
 RingbufHandle_t TFL_log_buffer = nullptr;
+#ifdef USE_TF_LITE_CSI
+RingbufHandle_t TFL_training_buffer = nullptr;
+static portMUX_TYPE csi_spinlock = portMUX_INITIALIZER_UNLOCKED; // spinlock for ISR
+#endif
 
+/*********************************************************************************************\
+ * CSI-specific functions
+\*********************************************************************************************/
+#ifdef USE_TF_LITE_CSI
+
+static inline void TFL_extract_features_raw(int8_t* csi_data, int data_len, TFL_csi_ctx_t* csi, wifi_csi_info_t* info);
+static inline void TFL_extract_features_lightweight(int8_t* csi_data, int data_len, TFL_csi_ctx_t* csi, wifi_csi_info_t* info);
+static inline void TFL_extract_features_mfcc_like(int8_t* csi_data, int data_len, TFL_csi_ctx_t* csi, wifi_csi_info_t* info);
+
+/**
+ * @brief Lightweight CSI callback - must be fast and ISR-safe
+ */
+static void IRAM_ATTR wifi_csi_rx_cb(void *ctx, wifi_csi_info_t *info) {
+    if (!TFL || !TFL->csi || !TFL->csi->capturing || !info || !info->buf) {
+        return;
+    }
+    
+    // Quick validation
+    if (info->len < 4) {
+        portENTER_CRITICAL_ISR(&csi_spinlock);
+        TFL->csi->packets_dropped++;
+        portEXIT_CRITICAL_ISR(&csi_spinlock);
+        return;
+    }
+    
+    TFL_csi_ctx_t* csi = TFL->csi;
+
+    // Get buffer pointers
+    int8_t* csi_data = info->buf;
+    uint16_t data_len = info->len;
+    
+    // Skip first word if invalid (ESP32 hardware limitation)
+    if (info->first_word_invalid) {
+        csi_data += 4;
+        data_len -= 4;
+        if (data_len < 4) {
+            portENTER_CRITICAL_ISR(&csi_spinlock);
+            csi->packets_dropped++;
+            portEXIT_CRITICAL_ISR(&csi_spinlock);
+            return;
+        }
+    }
+    
+    // Get current buffer index atomically
+    portENTER_CRITICAL_ISR(&csi_spinlock);
+    int current_idx = csi->feature_buffer_idx;
+    int next_idx = (current_idx + 1) % 10;
+    portEXIT_CRITICAL_ISR(&csi_spinlock);
+    
+    // Calculate output location
+    int8_t* output_buffer = csi->feature_buffer + (current_idx * csi->feature_size);
+    
+    // Copy only what fits
+    int copy_size = (data_len < csi->feature_size) ? data_len : csi->feature_size;
+    memcpy(output_buffer, csi_data, copy_size);
+    
+    // Zero-pad if needed
+    if (copy_size < csi->feature_size) {
+        memset(output_buffer + copy_size, 0, csi->feature_size - copy_size);
+    }
+    
+    if (csi->config.training_mode) {
+        switch (csi->config.feature_mode) {
+            case 0: // Raw
+                TFL_extract_features_raw(csi_data, copy_size, csi, info);
+                break;
+            case 1: // Lightweight  
+                TFL_extract_features_lightweight(csi_data, copy_size, csi, info);
+                break;
+            case 2: // MFCC-like
+                // TFL_extract_features_mfcc_like(csi_data, copy_size, csi, info);
+                break;
+        }
+    }
+
+    // Update index and counters atomically
+    portENTER_CRITICAL_ISR(&csi_spinlock);
+    csi->feature_buffer_idx = next_idx;
+    csi->packets_received++;
+    portEXIT_CRITICAL_ISR(&csi_spinlock);
+    
+    // Signal new data
+    TFL->option.new_input_data = 1;
+}
+
+static inline void TFL_extract_features_raw(int8_t* csi_data, int data_len, TFL_csi_ctx_t* csi, wifi_csi_info_t* info) {
+    if (!TFL_training_buffer) return;
+    
+    // Validate data length to prevent overflow
+    if (data_len > 512) {  // Reasonable max for CSI data
+        data_len = 512;
+    }
+    
+    // Binary packet: [timestamp(4)][rssi(1)][noise_floor(1)][data_len(2)][csi_data(data_len)]
+    size_t packet_size = 8 + data_len;
+    
+    // Static buffer to avoid malloc in ISR - reused across calls
+    static uint8_t bin_packet[520];  // 8 header + 512 max data
+    
+    // Timestamp (4 bytes, little-endian for easier parsing)
+    *(uint32_t *)&bin_packet[0] = get_timestamp_ms();
+
+    
+    // RSSI (as signed int8_t)
+    bin_packet[4] = (uint8_t)(info->rx_ctrl.rssi);
+    
+    // Noise floor (as signed int8_t)
+    bin_packet[5] = (uint8_t)(info->rx_ctrl.noise_floor);
+    
+    // Data length (2 bytes, little-endian)
+    bin_packet[6] = data_len & 0xFF;
+    bin_packet[7] = (data_len >> 8) & 0xFF;
+    
+    // Copy raw CSI data
+    memcpy(bin_packet + 8, csi_data, data_len);
+    
+    // Send to ring buffer - uses internal copy
+    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+    BaseType_t result = xRingbufferSendFromISR(TFL_training_buffer, bin_packet, packet_size, &xHigherPriorityTaskWoken);
+    
+    if (result != pdTRUE) {
+        // Track dropped packets
+        portENTER_CRITICAL_ISR(&csi_spinlock);
+        csi->packets_dropped++;
+        portEXIT_CRITICAL_ISR(&csi_spinlock);
+    }
+    
+    portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
+}
+
+static inline void TFL_extract_features_lightweight(int8_t* csi_data, int data_len, TFL_csi_ctx_t* csi, wifi_csi_info_t* info) {
+    if (!TFL_training_buffer) return;
+    
+    // Validate input
+    if (data_len <= 0 || data_len > 512) return;
+    
+    // Enhanced statistical features
+    int32_t sum = 0;
+    int64_t sum_sq = 0;
+    int8_t min_val = 127;
+    int8_t max_val = -128;
+    int32_t abs_sum = 0;
+    int zero_crossings = 0;
+    int8_t prev_val = csi_data[0];
+    
+    // Single pass through data for basic statistics
+    for (int i = 0; i < data_len; i++) {
+        int8_t val = csi_data[i];
+        int32_t val32 = val;
+        int64_t val_sq = (int64_t)val32 * val32;
+        
+        sum += val32;
+        sum_sq += val_sq;
+        abs_sum += abs(val32);
+        
+        if (val < min_val) min_val = val;
+        if (val > max_val) max_val = val;
+        
+        // Zero crossing detection with noise threshold
+        if (i > 0) {
+            if ((prev_val > 2 && val < -2) || (prev_val < -2 && val > 2)) {
+                zero_crossings++;
+            }
+        }
+        prev_val = val;
+    }
+    
+    // Calculate ALL statistics in floating point
+    float mean_f = (float)sum / (float)data_len;
+    float variance_f = ((float)sum_sq - (float)data_len * mean_f * mean_f) / (float)(data_len - 1);
+    if (variance_f < 0) variance_f = 0.0f;
+    float std_dev_f = sqrtf(variance_f);
+    
+    // Calculate centered moments for skewness and kurtosis
+    float sum_cube_centered = 0.0f;
+    float sum_quad_centered = 0.0f;
+    
+    for (int i = 0; i < data_len; i++) {
+        float centered = (float)csi_data[i] - mean_f;
+        float squared = centered * centered;
+        sum_cube_centered += squared * centered;
+        sum_quad_centered += squared * squared;
+    }
+    
+    // Calculate skewness and kurtosis
+    float skewness_f = 0.0f;
+    float kurtosis_f = 0.0f;
+    
+    if (std_dev_f > 1e-10f) {
+        float n = (float)data_len;
+        skewness_f = (sum_cube_centered / n) / (std_dev_f * std_dev_f * std_dev_f);
+        kurtosis_f = (sum_quad_centered / n) / (variance_f * variance_f) - 3.0f;
+    }
+    
+    // Scale for integer transmission (preserve 3 decimal places)
+    int32_t mean_scaled = (int32_t)(mean_f * 1000.0f);
+    int32_t std_dev_scaled = (int32_t)(std_dev_f * 1000.0f);
+    int32_t skewness_scaled = (int32_t)(skewness_f * 1000.0f);
+    int32_t kurtosis_scaled = (int32_t)(kurtosis_f * 1000.0f);
+    
+    // Energy - cap to prevent overflow
+    int32_t energy = (sum_sq > 0x7FFFFFFF) ? 0x7FFFFFFF : (int32_t)sum_sq;
+    int32_t mad = abs_sum / data_len;
+    
+    // Binary packet - LITTLE ENDIAN to match raw format
+    uint8_t bin_packet[34];   // one less than before
+
+    // Timestamp (little-endian, 4 bytes)
+    *(uint32_t *)&bin_packet[0] = get_timestamp_ms();
+
+
+    // RSSI and noise floor
+    bin_packet[4] = (uint8_t)(info->rx_ctrl.rssi);
+    bin_packet[5] = (uint8_t)(info->rx_ctrl.noise_floor);
+
+    // Statistical features (little-endian, scaled by 1000)
+    bin_packet[6]  = mean_scaled & 0xFF;
+    bin_packet[7]  = (mean_scaled >> 8) & 0xFF;
+    bin_packet[8]  = (mean_scaled >> 16) & 0xFF;
+    bin_packet[9]  = (mean_scaled >> 24) & 0xFF;
+
+    bin_packet[10] = std_dev_scaled & 0xFF;
+    bin_packet[11] = (std_dev_scaled >> 8) & 0xFF;
+    bin_packet[12] = (std_dev_scaled >> 16) & 0xFF;
+    bin_packet[13] = (std_dev_scaled >> 24) & 0xFF;
+
+    bin_packet[14] = (uint8_t)min_val;
+    bin_packet[15] = (uint8_t)max_val;
+
+    bin_packet[16] = energy & 0xFF;
+    bin_packet[17] = (energy >> 8) & 0xFF;
+    bin_packet[18] = (energy >> 16) & 0xFF;
+    bin_packet[19] = (energy >> 24) & 0xFF;
+
+    bin_packet[20] = mad & 0xFF;
+    bin_packet[21] = (mad >> 8) & 0xFF;
+    bin_packet[22] = (mad >> 16) & 0xFF;
+    bin_packet[23] = (mad >> 24) & 0xFF;
+
+    bin_packet[24] = zero_crossings & 0xFF;
+    bin_packet[25] = (zero_crossings >> 8) & 0xFF;
+
+    bin_packet[26] = skewness_scaled & 0xFF;
+    bin_packet[27] = (skewness_scaled >> 8) & 0xFF;
+    bin_packet[28] = (skewness_scaled >> 16) & 0xFF;
+    bin_packet[29] = (skewness_scaled >> 24) & 0xFF;
+
+    bin_packet[30] = kurtosis_scaled & 0xFF;
+    bin_packet[31] = (kurtosis_scaled >> 8) & 0xFF;
+    bin_packet[32] = (kurtosis_scaled >> 16) & 0xFF;
+    bin_packet[33] = (kurtosis_scaled >> 24) & 0xFF;
+
+    // Send binary packet with error tracking
+    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+    BaseType_t result = xRingbufferSendFromISR(TFL_training_buffer, bin_packet, 34, &xHigherPriorityTaskWoken);
+    
+    if (result != pdTRUE) {
+        portENTER_CRITICAL_ISR(&csi_spinlock);
+        csi->packets_dropped++;
+        portEXIT_CRITICAL_ISR(&csi_spinlock);
+    }
+    
+    portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
+}
+
+static inline void TFL_extract_features_mfcc_like(int8_t* csi_data, int data_len, TFL_csi_ctx_t* csi, wifi_csi_info_t* info){
+  // implement later
+}
+
+/**
+ * @brief Initialize CSI with proper error handling
+ */
+bool TFL_init_CSI(const uint8_t* descriptor) {
+    AddLog(LOG_LEVEL_INFO, PSTR("TFL: Starting CSI initialization"));
+    
+#if !CSI_SUPPORTED
+    AddLog(LOG_LEVEL_ERROR, PSTR("TFL: CSI not supported on this ESP32 variant"));
+    return false;
+#endif
+    TFL_csi_descriptor_t* csi_desc = (TFL_csi_descriptor_t*)descriptor;
+    esp_err_t err;
+    int subcarrier_count = 56; // Default for 802.11n TODO: ESP32-S3 only!!!!!
+    esp_netif_t* netif;
+    
+    // Allocate context
+    TFL->csi = new TFL_csi_ctx_t{};
+    if (!TFL->csi) {
+        AddLog(LOG_LEVEL_ERROR, PSTR("TFL: Failed to allocate CSI context"));
+        return false;
+    }
+    TFL->csi->config = *csi_desc;
+
+    // Check WiFi mode and connection
+    wifi_mode_t mode;
+    err = esp_wifi_get_mode(&mode);
+    if (err != ESP_OK || (mode != WIFI_MODE_STA && mode != WIFI_MODE_APSTA)) {
+        AddLog(LOG_LEVEL_ERROR, PSTR("TFL: WiFi not in STA mode"));
+        goto error_cleanup;
+    }
+    
+    // Get AP info
+    wifi_ap_record_t ap_info;
+    err = esp_wifi_sta_get_ap_info(&ap_info);
+    if (err != ESP_OK) {
+        AddLog(LOG_LEVEL_ERROR, PSTR("TFL: Not connected to AP"));
+        goto error_cleanup;
+    }
+
+    if (ap_info.bandwidth == WIFI_BW_HT40) {
+        subcarrier_count = 114;
+        AddLog(LOG_LEVEL_INFO, PSTR("TFL: HT40 mode detected - 114 subcarriers"));
+    }
+    AddLog(LOG_LEVEL_INFO, PSTR("TFL: Connected to %s, Channel %d, Bandwidth: %u"), ap_info.ssid, ap_info.primary, ap_info.bandwidth);
+    
+    netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+    if (netif) {
+        esp_netif_ip_info_t ip_info;
+        if (esp_netif_get_ip_info(netif, &ip_info) == ESP_OK) {
+            // Use gateway directly for ping target - convert esp_ip4_addr_t to ip_addr_t
+            IP_ADDR4(&TFL->csi->target_addr, 
+                    ip4_addr1(&ip_info.gw),
+                    ip4_addr2(&ip_info.gw), 
+                    ip4_addr3(&ip_info.gw), 
+                    ip4_addr4(&ip_info.gw));
+            
+            AddLog(LOG_LEVEL_INFO, PSTR("TFL: STA IP: " IPSTR), IP2STR(&ip_info.ip));
+            AddLog(LOG_LEVEL_INFO, PSTR("TFL: Gateway: " IPSTR), IP2STR(&ip_info.gw));
+        } else {
+            AddLog(LOG_LEVEL_ERROR, PSTR("TFL: Failed to get IP info"));
+            goto error_cleanup;
+        }
+    } else {
+        AddLog(LOG_LEVEL_ERROR, PSTR("TFL: Failed to get network interface"));
+        goto error_cleanup;
+    }
+
+    // Setup ping using Espressif ping_sock API
+    TFL->csi->ping_config = ESP_PING_DEFAULT_CONFIG();
+    TFL->csi->ping_config.target_addr = TFL->csi->target_addr;
+    TFL->csi->ping_config.count = 0;  // infinite pings
+    TFL->csi->ping_config.interval_ms = 1000 / csi_desc->sample_rate;
+    TFL->csi->ping_config.timeout_ms = 1000;
+    TFL->csi->ping_config.task_stack_size = 2048;
+    TFL->csi->ping_config.task_prio = 2;
+
+    esp_ping_callbacks_t cbs;
+    cbs.on_ping_success = NULL;  // No action needed on ping success
+    cbs.on_ping_timeout = NULL;  // No action needed on ping timeout  
+    cbs.on_ping_end = NULL;      // No action needed on ping end
+    cbs.cb_args = TFL->csi;
+
+    err = esp_ping_new_session(&TFL->csi->ping_config, &cbs, &TFL->csi->ping_handle);
+    if (err != ESP_OK) {
+        AddLog(LOG_LEVEL_ERROR, PSTR("TFL: Ping session creation failed: 0x%x"), err);
+        goto error_cleanup;
+    }
+
+    // Start pinging
+    err = esp_ping_start(TFL->csi->ping_handle);
+
+    // Create mutex
+    TFL->csi->buffer_mutex = xSemaphoreCreateMutex();
+    if (!TFL->csi->buffer_mutex) {
+        AddLog(LOG_LEVEL_ERROR, PSTR("TFL: Failed to create mutex"));
+        delete TFL->csi;
+        TFL->csi = nullptr;
+        return false;
+    }
+    
+    // Calculate feature size (I/Q pairs as int8_t)
+    TFL->csi->feature_size = subcarrier_count * 2;
+    
+    // Allocate ring buffer (10 frames)
+    TFL->csi->feature_buffer_size = TFL->csi->feature_size * 10;
+    TFL->csi->feature_buffer = (int8_t*)heap_caps_malloc(
+        TFL->csi->feature_buffer_size, 
+        MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL
+    );
+    
+    if (!TFL->csi->feature_buffer) {
+        AddLog(LOG_LEVEL_ERROR, PSTR("TFL: Failed to allocate feature buffer"));
+        goto error_cleanup;
+    }
+    
+    memset(TFL->csi->feature_buffer, 0, TFL->csi->feature_buffer_size);
+    
+    // Clean slate
+    vTaskDelay(pdMS_TO_TICKS(100));
+    esp_wifi_set_csi(false);
+    esp_wifi_set_csi_rx_cb(NULL, NULL);
+    vTaskDelay(pdMS_TO_TICKS(50));
+    
+    // Register callback
+    err = esp_wifi_set_csi_rx_cb(wifi_csi_rx_cb, NULL);
+    if (err != ESP_OK) {
+        AddLog(LOG_LEVEL_ERROR, PSTR("TFL: CSI callback failed: 0x%x"), err);
+        goto error_cleanup;
+    }
+    
+    // Enable promiscuous mode
+    // esp_wifi_set_promiscuous(true);
+    // vTaskDelay(pdMS_TO_TICKS(50));
+    
+    // Configure CSI
+    wifi_csi_config_t csi_config;
+    memset(&csi_config, 0, sizeof(csi_config));
+    csi_config.lltf_en = 1;
+    
+    err = esp_wifi_set_csi_config(&csi_config);
+    if (err != ESP_OK) {
+        AddLog(LOG_LEVEL_ERROR, PSTR("TFL: CSI config failed: 0x%x"), err);
+        goto error_cleanup;
+    }
+    
+    // Enable CSI
+    err = esp_wifi_set_csi(true);
+    if (err != ESP_OK) {
+        AddLog(LOG_LEVEL_ERROR, PSTR("TFL: CSI enable failed: 0x%x"), err);
+        goto error_cleanup;
+    }
+    
+    TFL->csi->capturing = true;
+    TFL->max_invocations = csi_desc->max_invocations;
+    TFL->stats = new TFL_stats_t;
+
+    return true;
+
+error_cleanup:
+    esp_wifi_set_csi(false);
+    esp_wifi_set_csi_rx_cb(NULL, NULL);
+    esp_wifi_set_promiscuous(false);
+    TFL->stats = nullptr;
+    
+    if (TFL->csi) {
+        if (TFL->csi->buffer_mutex) {
+            vSemaphoreDelete(TFL->csi->buffer_mutex);
+        }
+        if (TFL->csi->feature_buffer) {
+            free(TFL->csi->feature_buffer);
+        }
+        delete TFL->csi;
+        TFL->csi = nullptr;
+    }
+    return false;
+}
+
+/**
+ * @brief Stop CSI capture and cleanup
+ */
+void TFL_stop_csi_capture() {
+    if (!TFL || !TFL->csi) {
+        return;
+    }
+    
+    AddLog(LOG_LEVEL_INFO, PSTR("TFL: Stopping CSI capture..."));
+    
+    // Stop capturing first
+    TFL->csi->capturing = false;
+
+    // Stop pinging
+    if (TFL->csi->ping_handle) {
+        esp_ping_stop(TFL->csi->ping_handle);
+        esp_ping_delete_session(TFL->csi->ping_handle);
+        TFL->csi->ping_handle = nullptr;
+    }
+    
+    // Disable CSI
+    esp_wifi_set_csi(false);
+    esp_wifi_set_csi_rx_cb(NULL, NULL);
+    esp_wifi_set_promiscuous(false);
+    
+    // Small delay to ensure callback isn't running
+    vTaskDelay(pdMS_TO_TICKS(10));
+    
+    // Clean up resources
+    if (TFL->csi->buffer_mutex) {
+        vSemaphoreDelete(TFL->csi->buffer_mutex);
+        TFL->csi->buffer_mutex = nullptr;
+    }
+    
+    if (TFL->csi->feature_buffer) {
+        free(TFL->csi->feature_buffer);
+        TFL->csi->feature_buffer = nullptr;
+    }
+    
+    delete TFL->csi;
+    TFL->csi = nullptr;
+    
+    AddLog(LOG_LEVEL_INFO, PSTR("TFL: CSI stopped and cleaned up"));
+}
+
+#endif // USE_TF_LITE_CSI
 
 /*********************************************************************************************\
  * Internal driver functions
@@ -366,7 +919,7 @@ void TFL_set_mic_config(const uint8_t *descriptor_buffer){
 }
 
 /**
- * @brief Updates the input tensor with the data from the featuree buffer, which works as a ring buffer and is a shared resorce.
+ * @brief Updates the input tensor with the data from the feature buffer, which works as a ring buffer and is a shared resource.
  * 
  */
 void TFL_mic_feature_buf_to_input(){
@@ -402,7 +955,7 @@ void TFL_stop_audio_capture(){
 #endif //USE_I2S
 
 /**
- * @brief Helper function to stop all runnning tasks
+ * @brief Helper function to stop all running tasks
  * 
  */
 void TFL_delete_tasks(){
@@ -415,6 +968,9 @@ void TFL_delete_tasks(){
 #ifdef USE_I2S
   if(TFL->mic != nullptr) {delete TFL->mic;} 
 #endif //USE_I2S
+#ifdef USE_TF_LITE_CSI
+  TFL_stop_csi_capture();
+#endif
   delete TFL;
   TFL = nullptr;
 }
@@ -456,6 +1012,8 @@ void TFL_task_loop(void *pvParameters){
   }
 #endif
 
+// CSI runs completely callback-based - NO task needed!
+
   TFL->option.running_loop = 1;
 
 // loop section
@@ -479,12 +1037,45 @@ void TFL_task_loop(void *pvParameters){
       }
     }
   #endif
+
+  #ifdef USE_TF_LITE_CSI
+    if(TFL->option.use_csi == 1 && TFL->csi && TFL->csi->capturing) {
+      // Thread-safe buffer copy using mutex
+      if (xSemaphoreTake(TFL->csi->buffer_mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+        
+        // Read current index atomically
+        portENTER_CRITICAL(&csi_spinlock);
+        int current_idx = TFL->csi->feature_buffer_idx;
+        portEXIT_CRITICAL(&csi_spinlock);
+        
+        // Get latest complete frame (one before current write position)
+        int latest_idx = (current_idx - 1 + 10) % 10;
+        
+        int8_t* latest_features = TFL->csi->feature_buffer + (latest_idx * TFL->csi->feature_size);
+        
+        // Bounds checking for tensor input
+        size_t copy_size = TFL->csi->feature_size;
+        if (copy_size > TFL->input->bytes) {
+          copy_size = TFL->input->bytes;
+          AddLog(LOG_LEVEL_DEBUG, PSTR("TFL: CSI feature truncated %d->%d"), TFL->csi->feature_size, copy_size);
+        }
+        
+        // Copy to input tensor
+        memcpy(TFL->input->data.int8, latest_features, copy_size);
+        
+        xSemaphoreGive(TFL->csi->buffer_mutex);
+        
+        TFL->option.new_input_data = 1;
+        TFL->option.delay_next_invocation = 0;
+      }
+    }
+  #endif
+
     if(TFL->option.new_input_data){
-      // MicroPrintf(PSTR("invocation requested"));
       TFL->option.running_invocation = 1;
       int invoke_status = interpreter.Invoke();
       if (invoke_status != kTfLiteOk) {
-        MicroPrintf(PSTR("Invoke failed"));
+        AddLog(LOG_LEVEL_ERROR, PSTR("TFL: Invoke failed"));
         TFL->option.running_loop = 0;
       }
       if(TFL->berry_output_buf != nullptr){
@@ -493,9 +1084,9 @@ void TFL_task_loop(void *pvParameters){
       TFL->stats->invocations++;
       TFL->option.unread_output = 1;
       TFL->option.running_invocation = 0;
-      TFL->option.new_input_data == 0;
+      TFL->option.new_input_data = 0;
     }
-    if(TFL->option.running_loop == 1) vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(1000 / TFL->max_invocations)); //maybe we already want to exit
+    if(TFL->option.running_loop == 1) vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(1000 / TFL->max_invocations));
   }
 
 // end of loop section
@@ -504,9 +1095,29 @@ loop_task_exit:
 #ifdef USE_I2S
   if(TFL->option.use_mic == 1) {TFL_stop_audio_capture();}
 #endif //USE_I2S
+#ifdef USE_TF_LITE_CSI
+  TFL_stop_csi_capture();
+#endif
   MicroPrintf(PSTR("end loop task"));
   TFL->option.loop_ended = 1;
   vTaskDelete( NULL );
+}
+
+// New function for full hex conversion without truncation
+String CSI_HexToString(uint8_t* data, uint32_t length) {
+  if (!data || !length) { return ""; }
+  
+  // Allocate string with exact size needed (2 chars per byte)
+  String result;
+  result.reserve(length * 2 + 1);
+  
+  char hex_char[3];
+  for (uint32_t i = 0; i < length; i++) {
+    snprintf(hex_char, sizeof(hex_char), "%02X", data[i]);
+    result += hex_char;
+  }
+  
+  return result;
 }
 
 /*********************************************************************************************\
@@ -518,7 +1129,7 @@ extern "C" {
  * @brief Create a context for a tensor flow session, that will later run in a task
  * 
  * @param vm 
- * @param type        BUF - generic byte buffer, MIC - microphone input
+ * @param type        BUF - generic byte buffer, MIC - microphone input, CSI - WiFi CSI input
  * @return btrue 
  * @return bfalse 
  */
@@ -527,6 +1138,12 @@ extern "C" {
       TFL_log_buffer = xRingbufferCreate(1028, RINGBUF_TYPE_NOSPLIT);
       AddLog(LOG_LEVEL_DEBUG, PSTR("TFL: init log buffer"));
     }
+#ifdef USE_TF_LITE_CSI
+    if (TFL_training_buffer == nullptr) {
+      TFL_training_buffer = xRingbufferCreate(2048, RINGBUF_TYPE_NOSPLIT);
+    }
+#endif
+
     TFL_delete_tasks();
     if(strlen(type) == 0){
       AddLog(LOG_LEVEL_DEBUG, PSTR("TFL: context deleted"));
@@ -554,7 +1171,29 @@ extern "C" {
       }
 #else
       AddLog(LOG_LEVEL_ERROR, PSTR("TFL: firmware with I2S audio required !!"));
+      return bfalse;
 #endif //USE_I2S
+    }
+    else if(*(uint32_t*)type == 0x00495343){ //CSI
+#ifdef USE_TF_LITE_CSI
+      if(descriptor && len==sizeof(TFL_csi_descriptor_t)){
+        if(TFL_init_CSI(descriptor)){
+          TFL->option.use_csi = 1;
+          AddLog(LOG_LEVEL_INFO, PSTR("TFL: CSI initialization SUCCESS"));
+        }
+        else{
+          AddLog(LOG_LEVEL_ERROR, PSTR("TFL: CSI initialization FAILED"));
+          return bfalse;
+        }
+      }
+      else{
+        AddLog(LOG_LEVEL_DEBUG, PSTR("TFL: expected CSI descriptor of size: %u"), sizeof(TFL_csi_descriptor_t));
+        return bfalse;
+      }
+#else
+      AddLog(LOG_LEVEL_ERROR, PSTR("TFL: firmware with CSI support required !!"));
+      return bfalse;
+#endif //USE_TF_LITE_CSI
     }
     else{
       AddLog(LOG_LEVEL_DEBUG, PSTR("TFL: unknown mode"));
@@ -673,13 +1312,29 @@ extern "C" {
  * @return const char* 
  */
   const char * be_TFL_log(struct bvm *vm){
-      size_t size;
-      char * item =  (char *)xRingbufferReceive(TFL_log_buffer, &size, pdMS_TO_TICKS(5));
-      if(item != NULL){
-        // item[size] = 0; // 0-terminate string
-        vRingbufferReturnItem(TFL_log_buffer, (void *)item);
+      // first check for training data (CSI)
+#ifdef USE_TF_LITE_CSI
+      if (TFL_training_buffer) {
+        size_t size;
+        uint8_t * training_item = (uint8_t *)xRingbufferReceive(TFL_training_buffer, &size, 0);
+        if (training_item != NULL) {
+          be_pushstring(vm, CSI_HexToString(training_item, size).c_str());
+          vRingbufferReturnItem(TFL_training_buffer, (void *)training_item);
+          return be_tostring(vm, -1);
+        }
       }
-      return (const char *)item;
+#endif
+      // fall back to regular logs
+      if (TFL_log_buffer) {
+        size_t size;
+        char * item = (char *)xRingbufferReceive(TFL_log_buffer, &size, pdMS_TO_TICKS(5));
+        if(item != NULL){
+          be_pushstring(vm, item);
+          vRingbufferReturnItem(TFL_log_buffer, (void *)item);
+          return be_tostring(vm, -1);
+        }
+      }
+      return NULL;
   }
 
 /**
@@ -689,47 +1344,213 @@ extern "C" {
  * @return json string
  */
   const char * be_TFL_stats(struct bvm *vm){
+      // Early validation - check if TFL system is properly initialized
+      if(!TFL || !TFL->stats) {
+          be_pushstring(vm, "{\"error\":\"tfl_not_initialized\"}");
+          return be_tostring(vm, -1);
+      }
 
-    const size_t size = 512;
-    char * s = (char*)calloc(size,1);
-    uint32_t pos = 0;
-    uint32_t inc = 0;
-    inc = snprintf_P(s + pos, size, PSTR("{\"model\":{\"input_shape\":["));
-    pos += inc;
-    uint32_t dims = TFL->input->dims->size;
-    for(int i=0;i<dims;i++){
-      inc = snprintf_P(s + pos, size-pos, PSTR("%u"),TFL->input->dims->data[i]);
+      const size_t size = 2048;  // Increased buffer size
+      char * s = (char*)calloc(size, 1);
+      if (!s) {
+          be_pushstring(vm, "{\"error\":\"memory_alloc_failed\"}");
+          return be_tostring(vm, -1);
+      }
+
+      uint32_t pos = 0;
+      uint32_t inc = 0;
+      
+      // Start JSON with comprehensive system info
+      inc = snprintf_P(s + pos, size - pos, 
+          PSTR("{\"system\":{\"initialized\":true,\"mode\":\""));
+      if (inc < 0 || (pos + inc) >= size) goto buffer_overflow;
       pos += inc;
-      if (i != dims-1){
-        inc = snprintf_P(s + pos, size-pos,",");
-        pos += inc;
-      } 
-    }
-    inc = snprintf_P(s + pos, size-pos, PSTR("],\"input_type\":%u,\"output_shape\":["),TFL->input->type);
-    pos += inc;
-    dims = TFL->output->dims->size;
-    for(int i=0;i<dims;i++){
-      inc = snprintf_P(s + pos, size-pos, PSTR("%u"),TFL->output->dims->data[i]);
+
+      // Add mode information
+      if (TFL->option.use_mic) {
+          inc = snprintf_P(s + pos, size - pos, PSTR("MIC"));
+      } else if (TFL->option.use_csi) {
+          inc = snprintf_P(s + pos, size - pos, PSTR("CSI"));
+      } else {
+          inc = snprintf_P(s + pos, size - pos, PSTR("BUFFER"));
+      }
+      if (inc < 0 || (pos + inc) >= size) goto buffer_overflow;
       pos += inc;
-      if (i != dims-1){
-        inc = snprintf_P(s + pos, size-pos,",");
-        pos += inc;
-      } 
-    }
-    inc = snprintf_P(s + pos, size-pos, PSTR("],\"output_type\":%u}"),TFL->output->type);
-    pos += inc;
-    inc = snprintf_P(s + pos, size-pos, PSTR(",\"session\":{\"used_arena\":%u"),TFL->stats->used_arena_bytes);
-    pos += inc;
-    inc = snprintf_P(s + pos, size-pos, PSTR(",\"loop_stack\":%u"),TFL->stats->loop_task_free_stack_bytes);
-    pos += inc;
-    if(TFL->option.use_mic == 1){
-      inc = snprintf_P(s + pos, size-pos, PSTR(",\"audio_stack\":%u"),TFL->stats->mic_task_free_stack_bytes);
+
+      inc = snprintf_P(s + pos, size - pos, PSTR("\",\"running\":%s,"), 
+                      TFL->option.running_loop ? "true" : "false");
+      if (inc < 0 || (pos + inc) >= size) goto buffer_overflow;
       pos += inc;
-    }
-    inc = snprintf_P(s + pos, size-pos, PSTR(",\"invocations\":%u}}"),TFL->stats->invocations);
-    be_pushstring(vm, s);
+
+      inc = snprintf_P(s + pos, size - pos, PSTR("\"max_invocations\":%u},"), TFL->max_invocations);
+      if (inc < 0 || (pos + inc) >= size) goto buffer_overflow;
+      pos += inc;
+
+      // Model information section
+      inc = snprintf_P(s + pos, size - pos, PSTR("\"model\":{"));
+      if (inc < 0 || (pos + inc) >= size) goto buffer_overflow;
+      pos += inc;
+
+      // Input tensor details
+      if (TFL->input && TFL->input->dims) {
+          inc = snprintf_P(s + pos, size - pos, PSTR("\"input\":{\"shape\":["));
+          if (inc < 0 || (pos + inc) >= size) goto buffer_overflow;
+          pos += inc;
+          
+          uint32_t dims = TFL->input->dims->size;
+          for(int i = 0; i < dims; i++) {
+              inc = snprintf_P(s + pos, size - pos, PSTR("%u"), TFL->input->dims->data[i]);
+              if (inc < 0 || (pos + inc) >= size) goto buffer_overflow;
+              pos += inc;
+              
+              if (i != dims - 1) {
+                  inc = snprintf_P(s + pos, size - pos, PSTR(","));
+                  if (inc < 0 || (pos + inc) >= size) goto buffer_overflow;
+                  pos += inc;
+              }
+          }
+          
+          // Add input tensor details
+          inc = snprintf_P(s + pos, size - pos, PSTR("],\"type\":%u,\"bytes\":%u,\"quantization\":{"),
+                          TFL->input->type, TFL->input->bytes);
+          if (inc < 0 || (pos + inc) >= size) goto buffer_overflow;
+          pos += inc;
+          
+          inc = snprintf_P(s + pos, size - pos, PSTR("\"scale\":%.6f,\"zero_point\":%d}},"),
+                          TFL->input->params.scale, TFL->input->params.zero_point);
+          if (inc < 0 || (pos + inc) >= size) goto buffer_overflow;
+          pos += inc;
+      } else {
+          inc = snprintf_P(s + pos, size - pos, PSTR("\"input\":{\"shape\":[],\"type\":0,\"bytes\":0,\"quantization\":{\"scale\":0.0,\"zero_point\":0}},"));
+          if (inc < 0 || (pos + inc) >= size) goto buffer_overflow;
+          pos += inc;
+      }
+
+      // Output tensor details
+      if (TFL->output && TFL->output->dims) {
+          inc = snprintf_P(s + pos, size - pos, PSTR("\"output\":{\"shape\":["));
+          if (inc < 0 || (pos + inc) >= size) goto buffer_overflow;
+          pos += inc;
+          
+          uint32_t dims = TFL->output->dims->size;
+          for(int i = 0; i < dims; i++) {
+              inc = snprintf_P(s + pos, size - pos, PSTR("%u"), TFL->output->dims->data[i]);
+              if (inc < 0 || (pos + inc) >= size) goto buffer_overflow;
+              pos += inc;
+              
+              if (i != dims - 1) {
+                  inc = snprintf_P(s + pos, size - pos, PSTR(","));
+                  if (inc < 0 || (pos + inc) >= size) goto buffer_overflow;
+                  pos += inc;
+              }
+          }
+          
+          // Add output tensor details
+          inc = snprintf_P(s + pos, size - pos, PSTR("],\"type\":%u,\"bytes\":%u,\"quantization\":{"),
+                          TFL->output->type, TFL->output->bytes);
+          if (inc < 0 || (pos + inc) >= size) goto buffer_overflow;
+          pos += inc;
+          
+          inc = snprintf_P(s + pos, size - pos, PSTR("\"scale\":%.6f,\"zero_point\":%d}},"),
+                          TFL->output->params.scale, TFL->output->params.zero_point);
+          if (inc < 0 || (pos + inc) >= size) goto buffer_overflow;
+          pos += inc;
+      } else {
+          inc = snprintf_P(s + pos, size - pos, PSTR("\"output\":{\"shape\":[],\"type\":0,\"bytes\":0,\"quantization\":{\"scale\":0.0,\"zero_point\":0}},"));
+          if (inc < 0 || (pos + inc) >= size) goto buffer_overflow;
+          pos += inc;
+      }
+
+      // Arena information
+      inc = snprintf_P(s + pos, size - pos, PSTR("\"arena\":{\"total_size\":%u,\"used_bytes\":%u,\"utilization\":%.1f}"),
+                      TFL->TensorArenaSize, TFL->stats->used_arena_bytes,
+                      TFL->TensorArenaSize > 0 ? (100.0 * TFL->stats->used_arena_bytes / TFL->TensorArenaSize) : 0.0);
+      if (inc < 0 || (pos + inc) >= size) goto buffer_overflow;
+      pos += inc;
+
+      // Close model section
+      inc = snprintf_P(s + pos, size - pos, PSTR("},\"session\":{"));
+      if (inc < 0 || (pos + inc) >= size) goto buffer_overflow;
+      pos += inc;
+
+      // Runtime statistics
+      inc = snprintf_P(s + pos, size - pos, PSTR("\"invocations\":%u,\"invocation_rate\":%.2f,"),
+                      TFL->stats->invocations,
+                      TFL->stats->invocations > 0 ? (TFL->stats->invocations / (millis() / 1000.0)) : 0.0);
+      if (inc < 0 || (pos + inc) >= size) goto buffer_overflow;
+      pos += inc;
+
+      inc = snprintf_P(s + pos, size - pos, PSTR("\"memory\":{\"loop_stack_free\":%u,"),
+                      TFL->stats->loop_task_free_stack_bytes);
+      if (inc < 0 || (pos + inc) >= size) goto buffer_overflow;
+      pos += inc;
+
+      // Optional audio stats
+      if(TFL->option.use_mic == 1 && TFL->stats->mic_task_free_stack_bytes > 0){
+          inc = snprintf_P(s + pos, size - pos, PSTR("\"audio_stack_free\":%u,"), TFL->stats->mic_task_free_stack_bytes);
+          if (inc < 0 || (pos + inc) >= size) goto buffer_overflow;
+          pos += inc;
+      }
+
+  #ifdef USE_TF_LITE_CSI
+      // Comprehensive CSI statistics
+      if(TFL->option.use_csi == 1){
+          inc = snprintf_P(s + pos, size - pos, PSTR("\"csi\":{"));
+          if (inc < 0 || (pos + inc) >= size) goto buffer_overflow;
+          pos += inc;
+          
+          if(TFL->csi){
+              inc = snprintf_P(s + pos, size - pos, 
+                  PSTR("\"packets_received\":%u,\"packets_dropped\":%u,\"drop_rate\":%.2f,"),
+                  TFL->csi->packets_received, TFL->csi->packets_dropped,
+                  TFL->csi->packets_received > 0 ? 
+                  (100.0 * TFL->csi->packets_dropped / (TFL->csi->packets_received + TFL->csi->packets_dropped)) : 0.0);
+              if (inc < 0 || (pos + inc) >= size) goto buffer_overflow;
+              pos += inc;
+              
+              inc = snprintf_P(s + pos, size - pos, 
+                  PSTR("\"feature_size\":%u,\"buffer_size\":%u,\"capturing\":%s"),
+                  TFL->csi->feature_size, TFL->csi->feature_buffer_size,
+                  TFL->csi->capturing ? "true" : "false");
+              if (inc < 0 || (pos + inc) >= size) goto buffer_overflow;
+              pos += inc;
+          } else {
+              inc = snprintf_P(s + pos, size - pos, PSTR("\"error\":\"csi_context_null\""));
+              if (inc < 0 || (pos + inc) >= size) goto buffer_overflow;
+              pos += inc;
+          }
+          
+          inc = snprintf_P(s + pos, size - pos, PSTR("},"));
+          if (inc < 0 || (pos + inc) >= size) goto buffer_overflow;
+          pos += inc;
+      }
+  #endif
+
+      // Performance metrics
+      inc = snprintf_P(s + pos, size - pos, PSTR("\"performance\":{\"max_invocations_sec\":%u}}"), TFL->max_invocations);
+      if (inc < 0 || (pos + inc) >= size) goto buffer_overflow;
+      pos += inc;
+
+      // Final safety check
+      if (pos >= size) {
+          goto buffer_overflow;
+      }
+
+      // Success - push the string
+      be_pushstring(vm, s);
+      free(s);
+      return be_tostring(vm, -1);
+
+  buffer_overflow:
+    // Handle buffer overflow gracefully - create error message properly
     free(s);
-    return s;
+    char error_msg[128];
+    snprintf(error_msg, sizeof(error_msg), 
+             "{\"error\":\"buffer_overflow\",\"buffer_size\":2048,\"required_size\":%u}", 
+             pos);
+    
+    be_pushstring(vm, error_msg);
+    return be_tostring(vm, -1);
   }
 
 } //extern "C"
