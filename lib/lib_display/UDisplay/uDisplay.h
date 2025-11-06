@@ -108,7 +108,6 @@ class uDisplay : public Renderer {
   void invertDisplay(boolean i);
   void SetPwrCB(pwr_cb cb) { pwr_cbp = cb; };
   void SetDimCB(dim_cb cb) { dim_cbp = cb; };
-
 #ifdef USE_UNIVERSAL_TOUCH
 // universal touch driver
   bool utouch_Init(char **name);
