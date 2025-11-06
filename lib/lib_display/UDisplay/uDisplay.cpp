@@ -502,7 +502,32 @@ uDisplay::uDisplay(char *lp) : Renderer(800, 600) {
             dsp_on = next_hex(&lp1);
             break;
           case 'R':
-            // Parse directly into SPI config (used by SPI panels only)
+            // Parse MADCTL command and values for I80 parallel panels
+            #ifdef UDISPLAY_I80
+            if (interface == _UDSP_PAR8 || interface == _UDSP_PAR16) {
+              // Parse MADCTL from display.ini, use robust defaults if missing/incomplete
+              bool madctl_found = false;
+              uint8_t madctl_vals[4] = {0x2C, 0x08, 0xC8, 0xA4}; // ST7789 usual values
+              if (*lp1 != '\0' && *lp1 != '\n') {
+                panel_config->i80.cmd_madctl = next_hex(&lp1); // e.g. 0x36
+                uint8_t madctl_count = next_hex(&lp1); // e.g. 0x81 (count=1)
+                // Parse up to 4 MADCTL values, fallback to defaults if missing
+                for (int i = 0; i < 4; i++) {
+                  if (*lp1 != '\0' && *lp1 != ',' && *lp1 != '\n') {
+                    panel_config->i80.madctl_rot[i] = next_hex(&lp1);
+                  } else {
+                    panel_config->i80.madctl_rot[i] = madctl_vals[i];
+                  }
+                }
+                madctl_found = true;
+              }
+              // If not found, set sensible defaults
+              if (!madctl_found) {
+                panel_config->i80.cmd_madctl = 0x36; // default MADCTL command
+                for (int i = 0; i < 4; i++) panel_config->i80.madctl_rot[i] = madctl_vals[i];
+              }
+            } else
+            #endif
             if (interface == _UDSP_SPI) {
               panel_config->spi.cmd_memory_access = next_hex(&lp1);
               panel_config->spi.cmd_startline = next_hex(&lp1);
@@ -1339,13 +1364,7 @@ if (interface == _UDSP_SPI) {
       panel_config->i80.clock_speed_hz = (uint32_t)spi_speed * 1000000;
       panel_config->i80.init_commands = dsp_cmds;
       panel_config->i80.init_commands_count = dsp_ncmds;
-      
-      // CRITICAL: Pass MADCTL values for rotation support
-      panel_config->i80.cmd_madctl = madctrl;
-      for (int i = 0; i < 4; i++) {
-        panel_config->i80.madctl_rot[i] = rot[i];
-      }
-      
+
       universal_panel = new I80Panel(panel_config->i80);
 
       if (bpanel >= 0) {
