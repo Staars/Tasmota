@@ -110,6 +110,9 @@ void uDisplay::setAddrWindow(uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1)
 void uDisplay::setRotation(uint8_t rotation) {
     cur_rot = rotation;
     if (universal_panel->setRotation(rotation)) {
+        // Update uDisplay dimensions based on rotation
+        _width = (rotation & 1) ? panel_config->i80.height : panel_config->i80.width;
+        _height = (rotation & 1) ? panel_config->i80.width : panel_config->i80.height;
         return;
     }
 
