@@ -510,54 +510,150 @@ static bool wc_rgb565_write(void * arg, uint16_t x, uint16_t y, uint16_t w, uint
 }
 #endif
 
-// converts to a monochrome pixel array - quite fast
+// converts to a monochrome pixel array
+// New API doesn't support grayscale directly, so decode to RGB888 then convert
 bool wc_jpg2mono(const uint8_t *src, size_t src_len, struct PICSTORE * out, int scale)
 {
-    wc_rgb_jpg_decoder jpeg;
-    jpeg.width = 0;
-    jpeg.height = 0;
-    jpeg.input = src;
-    jpeg.poutput = out;
-    jpeg.data_offset = 0;
-
-    if(esp_jpg_decode(src_len, (jpg_scale_t)scale, wc_jpg_read, _mono_write, (void*)&jpeg) != ESP_OK){
+    esp_jpeg_image_scale_t jpeg_scale;
+    switch(scale) {
+        case 0: jpeg_scale = JPEG_IMAGE_SCALE_0; break;
+        case 1: jpeg_scale = JPEG_IMAGE_SCALE_1_2; break;
+        case 2: jpeg_scale = JPEG_IMAGE_SCALE_1_4; break;
+        case 3: jpeg_scale = JPEG_IMAGE_SCALE_1_8; break;
+        default: jpeg_scale = JPEG_IMAGE_SCALE_0; break;
+    }
+    
+    // First get image info to know dimensions
+    esp_jpeg_image_cfg_t cfg = {
+        .indata = (uint8_t*)src,
+        .indata_size = src_len,
+        .outbuf = NULL,
+        .outbuf_size = 0,
+        .out_format = JPEG_IMAGE_FORMAT_RGB888,
+        .out_scale = jpeg_scale
+    };
+    esp_jpeg_image_output_t img_info;
+    
+    if(esp_jpeg_get_image_info(&cfg, &img_info) != ESP_OK){
         return false;
     }
+    
+    // Allocate temp RGB888 buffer
+    uint8_t *temp_rgb = (uint8_t*)malloc(img_info.output_len);
+    if(!temp_rgb) return false;
+    
+    // Decode to RGB888
+    cfg.outbuf = temp_rgb;
+    cfg.outbuf_size = img_info.output_len;
+    
+    if(esp_jpeg_decode(&cfg, &img_info) != ESP_OK){
+        free(temp_rgb);
+        return false;
+    }
+    
+    // Allocate grayscale output
+    if(!pic_alloc(out, img_info.width, img_info.height, 0, PIXFORMAT_GRAYSCALE, 1)){
+        free(temp_rgb);
+        return false;
+    }
+    
+    // Convert RGB888 to grayscale
+    uint8_t *rgb = temp_rgb;
+    uint8_t *gray = out->buff;
+    for(uint32_t i = 0; i < img_info.width * img_info.height; i++){
+        *gray++ = (rgb[0] + rgb[1] + rgb[2]) / 3;
+        rgb += 3;
+    }
+    
+    free(temp_rgb);
     return true;
 }
 
 
 #ifdef WC_USE_RGB_DECODE      
 // converts to a 3x8 bit pixel array
-// from to_bmp.c - unfortunately thier version is static
 bool wc_jpg2rgb888(const uint8_t *src, size_t src_len, struct PICSTORE * out, int scale)
 {
-    wc_rgb_jpg_decoder jpeg;
-    jpeg.width = 0;
-    jpeg.height = 0;
-    jpeg.input = src;
-    jpeg.poutput = out;
-    jpeg.data_offset = 0;
-
-    if(esp_jpg_decode(src_len, (jpg_scale_t) scale, wc_jpg_read, wc_rgb_write, (void*)&jpeg) != ESP_OK){
+    esp_jpeg_image_scale_t jpeg_scale;
+    switch(scale) {
+        case 0: jpeg_scale = JPEG_IMAGE_SCALE_0; break;
+        case 1: jpeg_scale = JPEG_IMAGE_SCALE_1_2; break;
+        case 2: jpeg_scale = JPEG_IMAGE_SCALE_1_4; break;
+        case 3: jpeg_scale = JPEG_IMAGE_SCALE_1_8; break;
+        default: jpeg_scale = JPEG_IMAGE_SCALE_0; break;
+    }
+    
+    // Get image info
+    esp_jpeg_image_cfg_t cfg = {
+        .indata = (uint8_t*)src,
+        .indata_size = src_len,
+        .outbuf = NULL,
+        .outbuf_size = 0,
+        .out_format = JPEG_IMAGE_FORMAT_RGB888,
+        .out_scale = jpeg_scale
+    };
+    esp_jpeg_image_output_t img_info;
+    
+    if(esp_jpeg_get_image_info(&cfg, &img_info) != ESP_OK){
         return false;
     }
+    
+    // Allocate output buffer
+    if(!pic_alloc(out, img_info.width, img_info.height, 0, PIXFORMAT_RGB888, 1)){
+        return false;
+    }
+    
+    // Decode directly to output
+    cfg.outbuf = out->buff;
+    cfg.outbuf_size = out->allocatedLen;
+    
+    if(esp_jpeg_decode(&cfg, &img_info) != ESP_OK){
+        return false;
+    }
+    
     return true;
 }
 
 
 bool wc_jpg2rgb565(const uint8_t *src, size_t src_len, struct PICSTORE * out, int scale)
 {
-    wc_rgb_jpg_decoder jpeg;
-    jpeg.width = 0;
-    jpeg.height = 0;
-    jpeg.input = src;
-    jpeg.poutput = out;
-    jpeg.data_offset = 0;
-
-    if(esp_jpg_decode(src_len, (jpg_scale_t) scale, wc_jpg_read, wc_rgb565_write, (void*)&jpeg) != ESP_OK){
+    esp_jpeg_image_scale_t jpeg_scale;
+    switch(scale) {
+        case 0: jpeg_scale = JPEG_IMAGE_SCALE_0; break;
+        case 1: jpeg_scale = JPEG_IMAGE_SCALE_1_2; break;
+        case 2: jpeg_scale = JPEG_IMAGE_SCALE_1_4; break;
+        case 3: jpeg_scale = JPEG_IMAGE_SCALE_1_8; break;
+        default: jpeg_scale = JPEG_IMAGE_SCALE_0; break;
+    }
+    
+    // Get image info
+    esp_jpeg_image_cfg_t cfg = {
+        .indata = (uint8_t*)src,
+        .indata_size = src_len,
+        .outbuf = NULL,
+        .outbuf_size = 0,
+        .out_format = JPEG_IMAGE_FORMAT_RGB565,
+        .out_scale = jpeg_scale
+    };
+    esp_jpeg_image_output_t img_info;
+    
+    if(esp_jpeg_get_image_info(&cfg, &img_info) != ESP_OK){
         return false;
     }
+    
+    // Allocate output buffer
+    if(!pic_alloc(out, img_info.width, img_info.height, 0, PIXFORMAT_RGB565, 1)){
+        return false;
+    }
+    
+    // Decode directly to output
+    cfg.outbuf = out->buff;
+    cfg.outbuf_size = out->allocatedLen;
+    
+    if(esp_jpeg_decode(&cfg, &img_info) != ESP_OK){
+        return false;
+    }
+    
     return true;
 }
 #endif
