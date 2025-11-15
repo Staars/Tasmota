@@ -64,6 +64,9 @@ typedef struct {
     image_t *img; 
     int stride;
     size_t buf_size;
+    bool crop_enabled;
+    uint16_t target_width;
+    uint16_t target_height;
 } be_jpg_decode_ctx_t;
 
 /*********************************************************************************************\
@@ -240,6 +243,25 @@ struct be_img_util {
       if (!ctx || !ctx->img || !ctx->img->buf) return 0;
       image_t *img = ctx->img;
       
+      // Crop check - skip MCUs outside target area (top-left crop)
+      if (ctx->crop_enabled) {
+          if (pDraw->x >= ctx->target_width || pDraw->y >= ctx->target_height) {
+              return 1;  // Skip this MCU entirely
+          }
+      }
+      
+      // Calculate actual copy dimensions (handle partial MCUs at edges)
+      int copy_width = pDraw->iWidth;
+      int copy_height = pDraw->iHeight;
+      if (ctx->crop_enabled) {
+          if (pDraw->x + copy_width > ctx->target_width) {
+              copy_width = ctx->target_width - pDraw->x;
+          }
+          if (pDraw->y + copy_height > ctx->target_height) {
+              copy_height = ctx->target_height - pDraw->y;
+          }
+      }
+      
       // Check if we're converting RGB8888 -> RGB888
       if (img->bpp == 3 && pDraw->iBpp == 32) {  // 32 bits = 4 bytes
           // Convert 4-byte pixels to 3-byte pixels on the fly
@@ -247,8 +269,8 @@ struct be_img_util {
           uint8_t *dst = img->buf + dst_offset;
           const uint8_t *src = (const uint8_t*)pDraw->pPixels;
           
-          for (int y = 0; y < pDraw->iHeight; ++y) {
-              for (int x = 0; x < pDraw->iWidth; ++x) {
+          for (int y = 0; y < copy_height; ++y) {
+              for (int x = 0; x < copy_width; ++x) {
                   dst[(y * ctx->stride) + (x * 3) + 0] = src[(y * pDraw->iWidth * 4) + (x * 4) + 0];
                   dst[(y * ctx->stride) + (x * 3) + 1] = src[(y * pDraw->iWidth * 4) + (x * 4) + 1];
                   dst[(y * ctx->stride) + (x * 3) + 2] = src[(y * pDraw->iWidth * 4) + (x * 4) + 2];
@@ -258,7 +280,7 @@ struct be_img_util {
       } else {
           // Normal case - direct copy
           size_t dst_offset = (pDraw->y * ctx->stride) + (pDraw->x * img->bpp);
-          size_t bytes_needed = pDraw->iHeight * ctx->stride;
+          size_t bytes_needed = copy_height * ctx->stride;
           if (dst_offset + bytes_needed > ctx->buf_size) {
               return 0;
           }
@@ -266,10 +288,10 @@ struct be_img_util {
           uint8_t *dst = img->buf + dst_offset;
           const uint8_t *src = (const uint8_t*)pDraw->pPixels;
           
-          for (int y = 0; y < pDraw->iHeight; ++y) {
+          for (int y = 0; y < copy_height; ++y) {
               memcpy(dst + y * ctx->stride, 
                     src + y * pDraw->iWidth * img->bpp,
-                    pDraw->iWidth * img->bpp);
+                    copy_width * img->bpp);
           }
       }
       return 1;
@@ -289,10 +311,22 @@ struct be_img_util {
       if (!input_buf || len <= 0 || !output_buf || !img) return false;
       if (img->bpp == 0) return false;
       
+      // Parse JPEG dimensions to check for mismatch
+      uint16_t jpeg_width, jpeg_height;
+      bool crop_enabled = false;
+      if (jpeg_size(input_buf, len, &jpeg_width, &jpeg_height)) {
+          if (jpeg_width != img->width || jpeg_height != img->height) {
+              // Dimension mismatch - enable cropping
+              crop_enabled = true;
+              AddLog(LOG_LEVEL_INFO, PSTR("IMG: JPEG crop %dx%d -> %dx%d"), 
+                     jpeg_width, jpeg_height, img->width, img->height);
+          }
+      }
+      
       img->buf = output_buf;
       int stride = img->width * img->bpp;
       size_t buf_size = img->width * img->height * img->bpp;
-      be_jpg_decode_ctx_t ctx = {img, stride, buf_size};
+      be_jpg_decode_ctx_t ctx = {img, stride, buf_size, crop_enabled, img->width, img->height};
 
       JPEGDEC *jpeg = new JPEGDEC();
       if (!jpeg) return false;
