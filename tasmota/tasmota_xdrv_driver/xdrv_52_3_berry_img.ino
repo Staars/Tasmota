@@ -280,8 +280,9 @@ struct be_img_util {
       } else {
           // Normal case - direct copy
           size_t dst_offset = (pDraw->y * ctx->stride) + (pDraw->x * img->bpp);
-          size_t bytes_needed = copy_height * ctx->stride;
-          if (dst_offset + bytes_needed > ctx->buf_size) {
+          // Check bounds for actual copy area, not full stride
+          size_t last_row_offset = ((pDraw->y + copy_height - 1) * ctx->stride) + (pDraw->x * img->bpp) + (copy_width * img->bpp);
+          if (last_row_offset > ctx->buf_size) {
               return 0;
           }
           
