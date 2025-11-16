@@ -319,7 +319,7 @@ struct be_img_util {
           if (jpeg_width != img->width || jpeg_height != img->height) {
               // Dimension mismatch - enable cropping
               crop_enabled = true;
-              AddLog(LOG_LEVEL_INFO, PSTR("IMG: JPEG crop %dx%d -> %dx%d"), 
+              AddLog(LOG_LEVEL_DEBUG, PSTR("IMG: JPEG crop %dx%d -> %dx%d"), 
                      jpeg_width, jpeg_height, img->width, img->height);
           }
       }
