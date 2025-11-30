@@ -368,7 +368,13 @@ void WcSetDefaults(uint32_t upgrade) {
   if (Wc.up) { WcApplySettings(); }
 }
 
+#ifdef USE_WEBCAM_SETUP_ONLY
+uint32_t WcSetup(int32_t fsiz, uint8_t _pixel_format, uint32_t xclock, uint16_t &berry_width, uint16_t &berry_height) {
+  pixformat_t pixel_format = pixformat_t(_pixel_format);
+#else
 uint32_t WcSetup(int32_t fsiz) {
+  constexpr pixformat_t pixel_format = PIXFORMAT_JPEG;
+#endif
   TasAutoMutex localmutex(&WebcamMutex, "WcSetup");
 
   AddLog(LOG_LEVEL_DEBUG, PSTR("CAM: WcSetup"));
@@ -457,7 +463,7 @@ uint32_t WcSetup(int32_t fsiz) {
   config.ledc_timer = LEDC_TIMER_0;
 //  config.xclk_freq_hz = 20000000;
   config.xclk_freq_hz = Settings->webcam_clk * 1000000;
-  config.pixel_format = PIXFORMAT_JPEG;
+  config.pixel_format = pixel_format;
 
   //esp_log_level_set("*", ESP_LOG_INFO);
 
@@ -466,13 +472,20 @@ uint32_t WcSetup(int32_t fsiz) {
 
   bool psram = UsePSRAM();
   if (psram) {
-    config.frame_size = FRAMESIZE_UXGA;
+
 #ifndef USE_WEBCAM_SETUP_ONLY
+    config.frame_size = FRAMESIZE_UXGA;
     config.jpeg_quality = 10;
     config.fb_count = 2;
 #else
+    config.frame_size =  (framesize_t)fsiz; // This maybe raw format with smaller
     config.jpeg_quality = 4; // start on the quality side for post processing
     config.fb_count = 1; // we do not really want to stream in pure Berry
+    config.grab_mode = CAMERA_GRAB_WHEN_EMPTY;
+    config.xclk_freq_hz = xclock * 1000000;
+#ifdef CONFIG_IDF_TARGET_ESP32S3
+    // esp_camera_set_psram_mode(true);
+#endif
 #endif
     AddLog(LOG_LEVEL_DEBUG, PSTR("CAM: PSRAM found"));
   } else {
@@ -517,6 +530,10 @@ uint32_t WcSetup(int32_t fsiz) {
   }
   Wc.width = wc_fb->width;
   Wc.height = wc_fb->height;
+#ifdef USE_WEBCAM_SETUP_ONLY
+  berry_width = Wc.width;
+  berry_height = Wc.height;
+#endif
   esp_camera_fb_return(wc_fb);
 
   WcApplySettings();
@@ -531,6 +548,7 @@ uint32_t WcSetup(int32_t fsiz) {
 
   // restore stream_active if we setup ok.
   Wc.stream_active = stream_active;
+  AddLog(LOG_LEVEL_DEBUG, PSTR("CAM: Setup done: %u"),Wc.up);
 
   return Wc.up;
 }
