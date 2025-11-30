@@ -39,6 +39,7 @@ extern "C" {
   struct {
     uint16_t width = 0;    ///< Current frame width
     uint16_t height = 0;   ///< Current frame height
+    uint8_t format = PIXFORMAT_JPEG;  ///< Current pixel format
     uint8_t mode = 0;      ///< Camera mode/resolution setting
   } WcBerry;
 
@@ -63,26 +64,46 @@ extern "C" {
   int be_cam_setup(struct bvm *vm) {
     
     int32_t argc = be_top(vm); // Get the number of arguments
-    if (argc == 1) {
+    if (argc >= 1) {
       WcBerry.mode = be_toint(vm, 1);
     }
     else{
       be_raise(vm, "cam_error", "need mode");
       be_return_nil(vm);
     }
-    
-    int result = WcSetup(WcBerry.mode);
-    if (result > 0) {
-      camera_fb_t *wc_fb = esp_camera_fb_get();
-      if(wc_fb){
-        WcBerry.width = wc_fb->width;
-        WcBerry.height = wc_fb->height;
-        esp_camera_fb_return(wc_fb);
-      }
+    if (argc >= 2) {
+      WcBerry.format = be_toint(vm, 2);
+      be_pop(vm, 1);
+    } else {
+      WcBerry.format = PIXFORMAT_JPEG;
     }
-    be_pushint(vm, result);
+
+    uint16_t xclock = 10; // default 10MHz
+    if (argc == 3) {
+      xclock = be_toint(vm, 3);
+      be_pop(vm, 1);
+    }
+
+    int result = WcSetup(WcBerry.mode, WcBerry.format, xclock, WcBerry.width, WcBerry.height);
+    if (result == 0) {
+      be_raise(vm, "cam_error", "setup failed");
+      be_return_nil(vm);
+    }
     be_pop(vm, 1);
+    be_pushint(vm, result);
     be_return(vm);
+  }
+
+  /**
+   * @brief Cleanup callback for camera frame buffer
+   * @param arg Pointer to camera_fb_t structure
+   */
+  static void cam_fb_cleanup(void* arg) {
+    camera_fb_t *fb = (camera_fb_t*)arg;
+    if(fb) {
+      esp_camera_fb_return(fb);
+      AddLog(LOG_LEVEL_DEBUG, PSTR("CAM: Frame buffer returned via cleanup"));
+    }
   }
 
   /**
@@ -94,6 +115,10 @@ extern "C" {
    * If no arguments: returns JPEG as bytes buffer
    * If img instance provided: stores image in instance (JPEG by default)
    * If format provided: decodes JPEG to specified format before storing
+   * 
+   * ZERO-COPY MODE: If camera captures in raw format matching requested format,
+   * wraps frame buffer directly without copying. Frame buffer is automatically
+   * returned when image is destroyed or cleared.
    */
   int be_cam_get_image(struct bvm *vm);
   int be_cam_get_image(struct bvm *vm) {
@@ -107,6 +132,7 @@ extern "C" {
     WcBerry.width = wc_fb->width;
     WcBerry.height = wc_fb->height;
 
+    bool zero_copy = false;  // Track if we're using zero-copy mode
     int32_t argc = be_top(vm);
     if (argc >= 1 && be_isinstance(vm, 1)) {
       const char * c = be_classname(vm, 1);
@@ -121,55 +147,86 @@ extern "C" {
         format =  be_toint(vm, 2);
       }
       if(img){
-        if(format < 0 || format == PIXFORMAT_JPEG){
-          be_img_util::from_buffer(img,wc_fb->buf, wc_fb->len, wc_fb->width, wc_fb->height, PIXFORMAT_JPEG);
-        } 
-        else {
-          bool success = false;
-          int bpp = be_img_util::getBytesPerPixel(pixformat_t(format));
-          if(wc_fb->width * wc_fb->height * bpp != img->len){ // we do not really want tu use it like that, but repeatedly write the same format
-            img->buf = (uint8_t*)heap_caps_realloc((void*)img->buf, wc_fb->width * wc_fb->height * bpp, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-            if(!img->buf){
-              be_img_util::clear(img);
-              be_raise(vm, "cam_error", "reallocation failed");
-              be_return_nil(vm);
+        // Check if camera captured in raw format matching requested format (zero-copy path)
+        if(format >= 0 && format != PIXFORMAT_JPEG) {
+          // Check if camera format matches requested format
+          // Note: format 1 (RGB565LE) uses PIXFORMAT_YUV422 internally
+          pixformat_t cam_format = wc_fb->format;
+          pixformat_t requested_format = (format == 1) ? PIXFORMAT_YUV422 : pixformat_t(format);
+          
+          if(cam_format == requested_format) {
+            // Camera captured in requested raw format - zero copy with cleanup callback!
+            be_img_util::wrap_external_buffer(img, wc_fb->buf, wc_fb->len, 
+                                               wc_fb->width, wc_fb->height, pixformat_t(format),
+                                               cam_fb_cleanup, (void*)wc_fb);
+            zero_copy = true;
+            AddLog(LOG_LEVEL_DEBUG, PSTR("CAM: Zero-copy wrap format %d"), format);
+          }
+        }
+        
+        if(!zero_copy) {
+          // Original path: copy or decode
+          if(format < 0 || format == PIXFORMAT_JPEG){
+            be_img_util::from_buffer(img,wc_fb->buf, wc_fb->len, wc_fb->width, wc_fb->height, PIXFORMAT_JPEG);
+          } 
+          else {
+            bool success = false;
+            int bpp = be_img_util::getBytesPerPixel(pixformat_t(format));
+            if(wc_fb->width * wc_fb->height * bpp != img->len){ // we do not really want tu use it like that, but repeatedly write the same format
+              if(img->owns_buffer) {
+                img->buf = (uint8_t*)heap_caps_realloc((void*)img->buf, wc_fb->width * wc_fb->height * bpp, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+              } else {
+                img->buf = (uint8_t*)heap_caps_malloc(wc_fb->width * wc_fb->height * bpp, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+                img->owns_buffer = true;
+              }
+              if(!img->buf){
+                be_img_util::clear(img);
+                be_raise(vm, "cam_error", "reallocation failed");
+                esp_camera_fb_return(wc_fb);
+                be_return_nil(vm);
+              }
             }
-          }
-          img->width =  wc_fb->width;
-          img->height = wc_fb->height;
-          img->bpp = bpp;
-          switch(pixformat_t(format)) {
-            case PIXFORMAT_GRAYSCALE:
-              success = be_img_util::jpeg_decode_one_image(wc_fb->buf, wc_fb->len, img->buf, EIGHT_BIT_GRAYSCALE, img);
-              break;
-            case PIXFORMAT_RGB565:
-              success = be_img_util::jpeg_decode_one_image(wc_fb->buf, wc_fb->len, img->buf, RGB565_BIG_ENDIAN, img);
-              break;
-            case PIXFORMAT_YUV422: // Format 1: RGB565LE
-              success = be_img_util::jpeg_decode_one_image(wc_fb->buf, wc_fb->len, img->buf, RGB565_LITTLE_ENDIAN, img);
-              break;
-            case PIXFORMAT_RGB888:
-              success = be_img_util::jpeg_decode_one_image(wc_fb->buf, wc_fb->len, img->buf, RGB8888, img);
-              break;
-          }
-          if(success){
-            img->len = wc_fb->width * wc_fb->height * bpp;
-            img->format = pixformat_t(format);
-          } else {
-            be_img_util::clear(img);
+            img->width =  wc_fb->width;
+            img->height = wc_fb->height;
+            img->bpp = bpp;
+            img->owns_buffer = true;
+            switch(pixformat_t(format)) {
+              case PIXFORMAT_GRAYSCALE:
+                success = be_img_util::jpeg_decode_one_image(wc_fb->buf, wc_fb->len, img->buf, EIGHT_BIT_GRAYSCALE, img);
+                break;
+              case PIXFORMAT_RGB565:
+                success = be_img_util::jpeg_decode_one_image(wc_fb->buf, wc_fb->len, img->buf, RGB565_BIG_ENDIAN, img);
+                break;
+              case PIXFORMAT_YUV422: // Format 1: RGB565LE
+                success = be_img_util::jpeg_decode_one_image(wc_fb->buf, wc_fb->len, img->buf, RGB565_LITTLE_ENDIAN, img);
+                break;
+              case PIXFORMAT_RGB888:
+                success = be_img_util::jpeg_decode_one_image(wc_fb->buf, wc_fb->len, img->buf, RGB8888, img);
+                break;
+            }
+            if(success){
+              img->len = wc_fb->width * wc_fb->height * bpp;
+              img->format = pixformat_t(format);
+            } else {
+              be_img_util::clear(img);
+            }
           }
         }
       }
       else{
         esp_camera_fb_return(wc_fb);
         be_raise(vm, "cam_error", "no image store");
+        be_return_nil(vm);
       }
     }
     else{
       be_pushbytes(vm, wc_fb->buf, wc_fb->len); // JPG
     }
 
-    esp_camera_fb_return(wc_fb);
+    // Return frame buffer only if not using zero-copy (cleanup callback will handle it)
+    if(!zero_copy) {
+      esp_camera_fb_return(wc_fb);
+    }
     be_return(vm);
   }
 
@@ -184,6 +241,7 @@ extern "C" {
     be_map_insert_int(vm, "mode", WcBerry.mode);
     be_map_insert_int(vm, "width", WcBerry.width);
     be_map_insert_int(vm, "height", WcBerry.height);
+    be_map_insert_int(vm, "format", WcBerry.format);
 
     be_pop(vm, 1);
     be_return(vm);

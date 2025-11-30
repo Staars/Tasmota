@@ -39,6 +39,9 @@ typedef struct {
     uint8_t bpp = 0;
     pixformat_t format = PIXFORMAT_JPEG;
     JPEGDEC * jpeg = nullptr;
+    bool owns_buffer = true;
+    void (*cleanup_callback)(void*) = nullptr;  ///< Optional cleanup function for external buffers
+    void* cleanup_arg = nullptr;                ///< Argument to pass to cleanup callback
 } image_t;
 
 typedef struct {
@@ -79,15 +82,24 @@ struct be_img_util {
    * @param img Pointer to image structure
    */
   static void clear(image_t *img){
-    if(img->buf){
-      free(img->buf);
-      img->buf = nullptr;
+    // Call cleanup callback if present (for external buffers)
+    if(img->cleanup_callback && img->cleanup_arg){
+      AddLog(LOG_LEVEL_DEBUG, PSTR("IMG: Calling cleanup callback from clear()"));
+      img->cleanup_callback(img->cleanup_arg);
+      img->cleanup_callback = nullptr;
+      img->cleanup_arg = nullptr;
     }
+    
+    if(img->buf && img->owns_buffer){
+      free(img->buf);
+    }
+    img->buf = nullptr;
     img->len = 0;
     img->bpp = 0;
     img->format = PIXFORMAT_JPEG;
     img->width = 0;
     img->height = 0;
+    img->owns_buffer = true;
   }
 
   /**
@@ -150,9 +162,17 @@ struct be_img_util {
    * @return true on success, false on failure
    */
   static bool from_buffer(image_t *img, uint8_t* buffer, size_t len, uint16_t w, uint16_t h, pixformat_t f) {
-    if(img->buf != nullptr) {
+    // Clean up previous buffer if needed
+    if(img->cleanup_callback && img->cleanup_arg){
+      AddLog(LOG_LEVEL_DEBUG, PSTR("IMG: Calling cleanup callback from from_buffer()"));
+      img->cleanup_callback(img->cleanup_arg);
+      img->cleanup_callback = nullptr;
+      img->cleanup_arg = nullptr;
+    }
+    if(img->buf != nullptr && img->owns_buffer) {
       free(img->buf);
     }
+    
     img->buf = (uint8_t *)heap_caps_malloc((len)+4, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if(img->buf) {
       memcpy(img->buf,buffer,len);
@@ -160,9 +180,50 @@ struct be_img_util {
       setFormat(img, f);
       img->width = w;
       img->height = h;
+      img->owns_buffer = true;
       return true;
     }
     return false;
+  }
+
+  /**
+   * @brief Wraps external buffer without copying (zero-copy)
+   * @param img Pointer to image structure
+   * @param buffer External buffer to wrap
+   * @param len Buffer length
+   * @param w Image width
+   * @param h Image height
+   * @param f Pixel format
+   * @param cleanup Optional cleanup callback for buffer release
+   * @param cleanup_arg Argument to pass to cleanup callback
+   * @return true on success, false on failure
+   */
+  static bool wrap_external_buffer(image_t *img, uint8_t* buffer, size_t len, uint16_t w, uint16_t h, pixformat_t f,
+                                     void (*cleanup)(void*) = nullptr, void* cleanup_arg = nullptr) {
+    AddLog(LOG_LEVEL_DEBUG, PSTR("IMG: wrap_external_buffer called, old_cleanup=%p, old_arg=%p"), 
+           img->cleanup_callback, img->cleanup_arg);
+    
+    // Clean up previous buffer if needed
+    if(img->cleanup_callback && img->cleanup_arg){
+      AddLog(LOG_LEVEL_DEBUG, PSTR("IMG: Calling cleanup callback from wrap_external_buffer()"));
+      img->cleanup_callback(img->cleanup_arg);
+      img->cleanup_callback = nullptr;
+      img->cleanup_arg = nullptr;
+    }
+    if(img->buf != nullptr && img->owns_buffer) {
+      free(img->buf);
+    }
+    
+    img->buf = buffer;
+    img->len = len;
+    setFormat(img, f);
+    img->width = w;
+    img->height = h;
+    img->owns_buffer = false;
+    img->cleanup_callback = cleanup;
+    img->cleanup_arg = cleanup_arg;
+    AddLog(LOG_LEVEL_DEBUG, PSTR("IMG: Wrapped external buffer, new_cleanup=%p, new_arg=%p"), cleanup, cleanup_arg);
+    return true;
   }
 
   /**
@@ -437,15 +498,27 @@ extern "C" {
    */
   int be_img_deinit(struct bvm *vm);
   int be_img_deinit(struct bvm *vm) {
+    AddLog(LOG_LEVEL_DEBUG, PSTR("IMG: be_img_deinit() called"));
     be_getmember(vm, 1, ".p");
     image_t * img = (image_t *) be_tocomptr(vm, -1);
     if(img){
-      if(img->buf != nullptr){
+      AddLog(LOG_LEVEL_DEBUG, PSTR("IMG: Deinit img=%p, cleanup=%p, arg=%p"), img, img->cleanup_callback, img->cleanup_arg);
+      // Call cleanup callback if present (for external buffers)
+      if(img->cleanup_callback && img->cleanup_arg){
+        AddLog(LOG_LEVEL_DEBUG, PSTR("IMG: Calling cleanup callback from deinit()"));
+        img->cleanup_callback(img->cleanup_arg);
+        img->cleanup_callback = nullptr;
+        img->cleanup_arg = nullptr;
+      }
+      
+      if(img->buf != nullptr && img->owns_buffer){
         free(img->buf);
       }
       delete img;
       be_pushcomptr(vm, (void*) NULL);
       be_setmember(vm, 1, ".p");
+    } else {
+      AddLog(LOG_LEVEL_DEBUG, PSTR("IMG: Deinit called but img is NULL"));
     }
     be_return_nil(vm);
   }
@@ -496,6 +569,7 @@ extern "C" {
       
       img->width = w;
       img->height = h;
+      img->owns_buffer = true;
       
       if(format == PIXFORMAT_GRAYSCALE) {
         success = be_img_util::jpeg_decode_one_image(src_buf, src_buf_len, img->buf, EIGHT_BIT_GRAYSCALE, img);
@@ -713,10 +787,13 @@ extern "C" {
           // be_return_nil(vm);
          break;
       }
-      free(img->buf);
+      if(img->owns_buffer) {
+        free(img->buf);
+      }
       be_img_util::setFormat(img, pixformat_t(format));
       img->len = temp_buf_len;
       img->buf = (uint8_t*)heap_caps_realloc((void*)temp_buf, img->len, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT); // shrinking should never fail ...
+      img->owns_buffer = true;
       if(img->buf == nullptr) {
         be_img_util::clear(img);
         free(temp_buf);
