@@ -3,17 +3,37 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased] - Development
 
-## [15.2.0.6]
+## [15.3.0.1]
 ### Added
-- Support for Sensirion SEN66 indoor air quality sensor (#24386)
+- Support for Sensirion SCD43 CO2 sensor
+- I2S full duplex, auto rx sample rate (#24469)
 
 ### Breaking Changed
 
 ### Changed
+- LVGL library from v9.4.0 to v9.5.0 (#24470)
+- Matter improved parameters handling (#24471)
+- Sensirion Core library from v0.6.0 to v0.7.2
+- Sen5x power on delay of 60ms (#24452)
 
 ### Fixed
+- Do not free BT memory when in use (#24480)
 
 ### Removed
+
+
+## [Released]
+
+## [15.3.0]
+- Release Susan
+
+## [15.2.0.6] 20260219
+### Added
+- Support for Sensirion SEN6x indoor air quality sensor (#24386)
+- Support for I2C FM24Cxx FRAM block read/write/format commands (#24457)
+
+### Changed
+- ESP8266 platform update from 2026.01.00 to 2026.02.00 (#24460)
 
 ## [15.2.0.5] 20260214
 ### Added
@@ -87,8 +107,6 @@ All notable changes to this project will be documented in this file.
 
 ### Removed
 - Berry `animate` to be replaced with `animation` framework (#24241)
-
-## [Released]
 
 ## [15.2.0]
 - Release Stephan
