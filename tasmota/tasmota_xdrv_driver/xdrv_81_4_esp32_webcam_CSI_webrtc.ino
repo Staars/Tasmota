@@ -2132,6 +2132,10 @@ void WebRTCProcessingTask(void *pvParameters) {
     uint8_t *src = Wc.core.frame_buffer[Wc.core.read_idx];
     esp_cache_msync(src, Wc.core.frame_buffer_size, ESP_CACHE_MSYNC_FLAG_DIR_M2C);
 
+    if (Wc.overlay.enabled) {
+      WcApplyOverlay(src, Wc.core.config.width, Wc.core.config.height);
+    }
+
     in_frame.raw_data.buffer = src;
     yuv_size = Wc.core.config.width * Wc.core.config.height * 3 / 2;
     in_frame.raw_data.len = yuv_size;

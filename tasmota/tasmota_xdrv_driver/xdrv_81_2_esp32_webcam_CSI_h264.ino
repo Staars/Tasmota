@@ -168,6 +168,11 @@ void H264ProcessingTask(void *pvParameters) {
     // Even for HW-to-HW, we ensure the previous write is visible
     esp_cache_msync(source_buf, Wc.core.frame_buffer_size, ESP_CACHE_MSYNC_FLAG_DIR_M2C);
 
+    // 2a. Apply PPA overlay if enabled (mockup: fixed 32x32 checkerboard at 16,16)
+    if (Wc.overlay.enabled) {
+      WcApplyOverlay(source_buf, Wc.core.config.width, Wc.core.config.height);
+    }
+
     // --- ZERO-COPY OPTIMIZATION START ---
     // We do NOT release the mutex yet. We hold it until encoding is done.
     in_frame.raw_data.buffer = source_buf;

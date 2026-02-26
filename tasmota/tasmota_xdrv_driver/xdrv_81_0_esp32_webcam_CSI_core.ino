@@ -48,6 +48,7 @@
 #include "esp_cache.h"
 #include "driver/jpeg_encode.h"
 #include "esp_ldo_regulator.h"
+#include "driver/ppa.h"
 
 // H.264 encoder for RTP session (ESP32-P4 hardware)
 extern "C" {
@@ -195,6 +196,20 @@ struct {
   IPAddress rtp_dest_ip;
   WiFiUDP rtp_udp;
   WiFiClient rtsp_client;
+
+  // --- 8. Overlay (PPA SRM) ---
+  struct {
+    ppa_client_handle_t client;
+    uint32_t  *fg_buf;         // RGB565 checkerboard source buffer (mode 1)
+    uint8_t   *berry_buf;      // RGB565 Berry-drawable buffer (mode 2), nullptr if unused
+    uint32_t   berry_buf_size; // size in bytes of berry_buf
+    uint16_t   berry_pos_x;    // overlay position in frame
+    uint16_t   berry_pos_y;
+    uint16_t   berry_w;        // overlay dimensions
+    uint16_t   berry_h;
+    uint8_t    mode;           // 0=off, 1=checkerboard, 2=berry buffer
+    bool       enabled;
+  } overlay;
 } Wc;
 
 // Statistics
@@ -248,12 +263,13 @@ struct {
 #define D_CMND_WC_WINDOW "Window"
 #define D_CMND_WC_QUALITY "Quality"
 #define D_CMND_WC_SESSION "Session"
+#define D_CMND_WC_OVERLAY "Overlay"
 
 const char kWCCommands[] PROGMEM = D_PREFX_WEBCAM "|"
-  D_CMND_WC_RES "|" D_CMND_WC_STREAM "|" D_CMND_WC_STOP "|" D_CMND_WC_STATUS "|" D_CMND_WC_CONFIG "|" D_CMND_WC_WINDOW "|" D_CMND_WC_QUALITY "|" D_CMND_WC_SESSION;
+  D_CMND_WC_RES "|" D_CMND_WC_STREAM "|" D_CMND_WC_STOP "|" D_CMND_WC_STATUS "|" D_CMND_WC_CONFIG "|" D_CMND_WC_WINDOW "|" D_CMND_WC_QUALITY "|" D_CMND_WC_SESSION "|" D_CMND_WC_OVERLAY;
 
 void (* const WCCommand[])(void) PROGMEM = {
-  &CmndWcRes, &CmndWcStream, &CmndWcStop, &CmndWcStatus, &CmndWcConfig, &CmndWcWindow, &CmndWcQuality, &CmndWcSession
+  &CmndWcRes, &CmndWcStream, &CmndWcStop, &CmndWcStatus, &CmndWcConfig, &CmndWcWindow, &CmndWcQuality, &CmndWcSession, &CmndWcOverlay
 };
 
 /*********************************************************************************************/
@@ -364,7 +380,7 @@ uint32_t WcInitPipeline() {
   // 1. Allocate Frame Buffers
   Wc.core.frame_buffer_size = Wc.core.config.width * Wc.core.config.height * 2;
   for (int i = 0; i < 2; i++) {
-    Wc.core.frame_buffer[i] = (uint8_t*)heap_caps_aligned_calloc(64, 1, Wc.core.frame_buffer_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    Wc.core.frame_buffer[i] = (uint8_t*)heap_caps_aligned_calloc(128, 1, Wc.core.frame_buffer_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!Wc.core.frame_buffer[i]) {
       AddLog(LOG_LEVEL_ERROR, PSTR("CAM: Frame buffer %d allocation failed"), i);
       WcDeinitPipeline();
