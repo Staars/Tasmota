@@ -3,13 +3,25 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased] - Development
 
-## [15.3.0.1]
+## [15.3.0.2]
+### Added
+
+### Breaking Changed
+
+### Changed
+- ESP8266 redesigned I2C Wire driver to support second I2C bus
+
+### Fixed
+- Crash when shutting down Wifi with `Wifi 0` (#24536)
+
+### Removed
+
+## [15.3.0.1] 20260308
 ### Added
 - Support for Sensirion SCD43 CO2 sensor
 - I2S full duplex, auto rx sample rate (#24469)
 - Support for Sensirion STCC4 CO2 sensor
-
-### Breaking Changed
+- Support for JSON value pair `"ARCH"` in template being either ESP8266, ESP32, ESP32C2, ESP32C3, ESP32C5, ESP32C6, ESP32H2, ESP32H4, ESP32P4, ESP32S2 or ESP32S3
 
 ### Changed
 - LVGL library from v9.4.0 to v9.5.0 (#24470)
@@ -20,6 +32,9 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 - Do not free BT memory when in use (#24480)
+- Berry avoid `tasmota.wifi()` returning bad values when wifi is turned off (#24505)
+- Don't send extraneous `0\r\n\r\n` with non-chunked HTTP/1.0 (#24518)
+- File upload improvements: `/ufsu` api mode, no interrupts disabling, cleaner confirmation page (#24521)
 
 ### Removed
 - Berry `tasmota.urlbecload()` superseded by Extension Manager (#24493)

@@ -112,8 +112,9 @@ The latter links can be used for OTA upgrades too like ``OtaUrl https://ota.tasm
 
 [Complete list](BUILDS.md) of available feature and sensors.
 
-## Changelog v15.3.0.1
+## Changelog v15.3.0.2
 ### Added
+- Support for JSON value pair `"ARCH"` in template being either ESP8266, ESP32, ESP32C2, ESP32C3, ESP32C5, ESP32C6, ESP32H2, ESP32H4, ESP32P4, ESP32S2 or ESP32S3
 - Support for Sensirion SCD42 and SCD43 CO2 sensor
 - Support for Sensirion STCC4 CO2 sensor
 - I2S full duplex, auto rx sample rate [#24469](https://github.com/arendst/Tasmota/issues/24469)
@@ -122,11 +123,16 @@ The latter links can be used for OTA upgrades too like ``OtaUrl https://ota.tasm
 ### Changed
 - Sensirion Core library from v0.6.0 to v0.7.2
 - LVGL library from v9.4.0 to v9.5.0 [#24470](https://github.com/arendst/Tasmota/issues/24470)
+- ESP8266 redesigned I2C Wire driver to support second I2C bus
 - SHT1x software reset I2C bus after initial (un)detection
 - Matter improved parameters handling [#24471](https://github.com/arendst/Tasmota/issues/24471)
 
 ### Fixed
+- Crash when shutting down Wifi with `Wifi 0` [#24536](https://github.com/arendst/Tasmota/issues/24536)
 - Do not free BT memory when in use [#24480](https://github.com/arendst/Tasmota/issues/24480)
+- Berry avoid `tasmota.wifi()` returning bad values when wifi is turned off [#24505](https://github.com/arendst/Tasmota/issues/24505)
+- Don't send extraneous `0\r\n\r\n` with non-chunked HTTP/1.0 [#24518](https://github.com/arendst/Tasmota/issues/24518)
+- File upload improvements: `/ufsu` api mode, no interrupts disabling, cleaner confirmation page [#24521](https://github.com/arendst/Tasmota/issues/24521)
 
 ### Removed
 - Berry `tasmota.urlbecload()` superseded by Extension Manager [#24493](https://github.com/arendst/Tasmota/issues/24493)
