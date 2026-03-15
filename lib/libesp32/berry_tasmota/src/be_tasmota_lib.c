@@ -21,6 +21,7 @@ extern int l_publish_rule(bvm *vm);
 extern int l_cmd(bvm *vm);
 extern int l_getoption(bvm *vm);
 extern int l_millis(bvm *vm);
+extern int l_micros(bvm *vm);
 extern int l_timereached(bvm *vm);
 extern int l_rtc(bvm *vm);
 extern int l_rtc_utc(bvm *vm);
@@ -72,9 +73,6 @@ extern int tasm_apply_str_op(bvm *vm);
 extern int32_t be_Tasmota_version(void);
 BE_FUNC_CTYPE_DECLARE(be_Tasmota_version, "i", "-");
 
-extern bbool BerryBECLoader(const char * url);
-BE_FUNC_CTYPE_DECLARE(BerryBECLoader, "b", "s")
-
 #include "solidify/solidified_tasmota_class.h"
 #include "solidify/solidified_rule_matcher.h"
 #include "solidify/solidified_trigger_class.h"
@@ -114,7 +112,8 @@ class be_class_tasmota (scope: global, name: Tasmota) {
     publish_rule, func(l_publish_rule)
     _cmd, func(l_cmd)
     get_option, func(l_getoption)
-    millis, func(l_millis)
+    millis, static_func(l_millis)
+    micros, static_func(l_micros)
     time_reached, func(l_timereached)
     rtc, static_func(l_rtc)
     rtc_utc, func(l_rtc_utc)
@@ -199,7 +198,6 @@ class be_class_tasmota (scope: global, name: Tasmota) {
     time_str, closure(class_Tasmota_time_str_closure)
     urlfetch, closure(class_Tasmota_urlfetch_closure)
     urlfetch_cmd, closure(class_Tasmota_urlfetch_cmd_closure)
-    urlbecload, static_ctype_func(BerryBECLoader)
 
     add_cron, closure(class_Tasmota_add_cron_closure)
     run_cron, closure(class_Tasmota_run_cron_closure)

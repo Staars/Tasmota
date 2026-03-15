@@ -118,6 +118,7 @@
 #define D_GATEWAY "Gateway"
 #define D_GROUP "Grupp"
 #define D_HALL_EFFECT "Hall Effect"
+#define D_HCHO "Formaldehyde"
 #define D_HEATINDEX "Heat index"
 #define D_HOST "Värd"
 #define D_HOSTNAME "Värdnamn"
@@ -348,6 +349,7 @@
 
 #define D_OTHER_PARAMETERS "Andra parametrar"
 #define D_TEMPLATE "Template"
+#define D_TEMPLATE_WRONG_ARCH "Reset to correct chip type"
 #define D_ACTIVATE "Activate"
 #define D_DEVICE_NAME "Device Name"
 #define D_WEB_ADMIN_PASSWORD "Webbadmin-lösenord"
@@ -541,6 +543,10 @@
 #define D_ENERGY_TODAY "Energi idag"
 #define D_ENERGY_YESTERDAY "Energi igår"
 #define D_ENERGY_TOTAL "Energi totalt"
+
+// xdrv_92_vid6608.ino
+#define D_VID6608_F "VID6608 F"
+#define D_VID6608_CW "VID6608 CW"
 
 // xsns_100_ina3221.ino
 #define  D_UNIT_CHARGE                    "Ah"
@@ -1038,6 +1044,8 @@
 #define D_SENSOR_WOOLIIS_RX    "Wooliis Rx"
 #define D_SENSOR_C8_CO2_5K_RX  "C8-CO2-5K Rx"
 #define D_SENSOR_C8_CO2_5K_TX  "C8-CO2-5K Tx"
+#define D_SENSOR_MKSKYBLU_TX   "MkSkyBlu Tx"
+#define D_SENSOR_MKSKYBLU_RX   "MkSkyBlu Rx"
 
 // Units
 #define D_UNIT_AMPERE "A"

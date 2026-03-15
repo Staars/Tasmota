@@ -1,7 +1,6 @@
 # Token Types and Token Class for Animation DSL
 # Defines all token types and the Token class with line/column tracking
 
-#@ solidify:Token,weak
 class Token
   # Basic token types
   # static var KEYWORD = 0        # strip, color, animation, sequence, etc.
@@ -27,29 +26,20 @@ class Token
   
   static var statement_keywords = [
     "strip", "set", "color", "palette", "animation", 
-    "sequence", "function", "zone", "on", "run", "template", "param", "import", "berry"
+    "sequence", "function", "on", "run", "template", "param", "import", "berry"
   ]
   
   static var keywords = [
     # Configuration keywords
-    "strip", "set", "import", "berry",
+    "strip", "set", "import", "berry", "extern",
     
     # Definition keywords
-    "color", "palette", "animation", "sequence", "function", "zone", "template", "param", "type",
+    "color", "palette", "animation", "sequence", "function", "template", "param", "type",
     
     # Control flow keywords
     "play", "for", "with", "repeat", "times", "forever", "if", "else", "elif",
     "choose", "random", "on", "run", "wait", "goto", "interrupt", "resume",
-    "while", "from", "to", "return", "reset", "restart",
-    
-    # Modifier keywords (only actual DSL syntax keywords)
-    "at", "ease", "sync", "every", "stagger", "across", "pixels",
-    
-    # Core built-in functions (minimal set for essential DSL operations)
-    "rgb", "hsv",
-    
-    # Spatial keywords
-    "all", "even", "odd", "center", "edges", "left", "right", "top", "bottom",
+    "while", "from", "to", "return", "reset", "restart", "every",
     
     # Boolean and special values
     "true", "false", "nil", "transparent",
@@ -59,7 +49,7 @@ class Token
     "brightness_change", "timer", "time", "sound_peak", "network_message",
     
     # Time and measurement keywords
-    "ms", "s", "m", "h", "bpm"
+    "ms", "s", "m", "h"
   ]
   
   static var color_names = [

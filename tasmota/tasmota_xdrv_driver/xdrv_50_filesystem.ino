@@ -194,17 +194,33 @@ char *fileOnly(char *fname){
 void UfsCheckSDCardInit(void) {
   // Try SPI mode first
   // SPI mode requires SDCARD_CS to be configured
+/*
   if (TasmotaGlobal.spi_enabled && PinUsed(GPIO_SDCARD_CS)) {
     int8_t cs = Pin(GPIO_SDCARD_CS);
+*/
+  uint32_t spi_bus = 0;
+  int8_t cs = -1;
+  if (TasmotaGlobal.spi_enabled && PinUsed(GPIO_SDCARD_CS)) {
+    cs = Pin(GPIO_SDCARD_CS);
+  }
+  if (TasmotaGlobal.spi_enabled2 && PinUsed(GPIO_SDCARD_CS, 1)) {
+    spi_bus = 1;
+    cs = Pin(GPIO_SDCARD_CS, 1);
+  }
+  if (cs > -1) {
 
 #ifdef ESP8266
     SPI.begin();
+    if (SD.begin(cs)) {
 #endif // ESP8266
 #ifdef ESP32
-    SPI.begin(Pin(GPIO_SPI_CLK), Pin(GPIO_SPI_MISO), Pin(GPIO_SPI_MOSI), -1);
+    if (1 == spi_bus) {
+      SPI_HSPI.begin(Pin(GPIO_SPI_CLK, spi_bus), Pin(GPIO_SPI_MISO, spi_bus), Pin(GPIO_SPI_MOSI, spi_bus), -1);
+    } else {
+      SPI.begin(Pin(GPIO_SPI_CLK), Pin(GPIO_SPI_MISO), Pin(GPIO_SPI_MOSI), -1);
+    }
+    if (SD.begin(cs, (1 == spi_bus) ? SPI_HSPI : SPI)) {
 #endif // ESP32
-
-    if (SD.begin(cs)) {
 #ifdef ESP8266
       ufsp = &SDFS;
 #endif  // ESP8266
@@ -222,7 +238,7 @@ void UfsCheckSDCardInit(void) {
       AddLog(LOG_LEVEL_INFO, PSTR(D_LOG_UFS "SDCard mounted"));
 #endif // ESP8266
 #ifdef ESP32
-      AddLog(LOG_LEVEL_INFO, PSTR(D_LOG_UFS "SDCard mounted (SPI mode) with %d kB free"), UfsInfo(1, 0));
+      AddLog(LOG_LEVEL_INFO, PSTR(D_LOG_UFS "SDCard mounted (SPI bus%d) with %d kB free"), spi_bus +1, UfsInfo(1, 0));
 #endif // ESP32
     }
   }
@@ -1271,9 +1287,6 @@ const char UFS_CURRDIR[] PROGMEM =
   #define D_CURR_DIR "Folder"
 #endif
 
-const char UFS_FORM_FILE_UPLOAD[] PROGMEM =
-  "<div id='f1' name='f1' style='display:block;'>"
-  "<fieldset><legend><b>&nbsp;" D_MANAGE_FILE_SYSTEM "&nbsp;</b></legend>";
 const char UFS_FORM_FILE_UPGc[] PROGMEM =
   "<div style='text-align:left;color:#%06x;'>" D_FS_SIZE " %s MB - " D_FS_FREE " %s MB";
 
@@ -1295,7 +1308,7 @@ const char UFS_FORM_SDC_DIRa[] PROGMEM =
 const char UFS_FORM_SDC_DIRc[] PROGMEM =
   "</div>";
 const char UFS_FORM_FILE_UPGb[] PROGMEM =
-  "<form method='get' action='ufse'><input type='hidden' name='file' value='%s/" D_NEW_FILE "'>"
+  "<input type='hidden' name='file' value='%s/" D_NEW_FILE "'>"
   "<button type='submit'>" D_CREATE_NEW_FILE "</button></form>";
 const char UFS_FORM_FILE_UPGb1[] PROGMEM =
   "<label><input type='checkbox' id='shf' onclick='sf(eb(\"shf\").checked);' name='shf'>" D_SHOW_HIDDEN_FILES "</label>";
@@ -1329,7 +1342,6 @@ const char UFS_FORM_SDC_HREFedit[] PROGMEM =
   "<a href='ufse?file=%s/%s'>&#x1F4DD;</a>"; // 📝
 
 const char HTTP_EDITOR_FORM_START[] PROGMEM =
-  "<fieldset><legend><b>&nbsp;" D_EDIT_FILE "&nbsp;</b></legend>"
   "<form>"
   "<label for='name'>" D_FILE ":</label><input type='text' id='name' name='name' value='%s'><br><hr width='98%%'>"
   "<textarea id='content' name='content' wrap='off' rows='8' cols='80' style='font-size: 12pt'>";
@@ -1340,6 +1352,21 @@ const char HTTP_EDITOR_FORM_END[] PROGMEM =
   "</form></fieldset>";
 
 #endif  // #ifdef GUI_EDIT_FILE
+
+// Wrapper around HandleUploadLoop() for /ufsu file uploads.
+// HandleUploadLoop() is shared between OTA firmware updates (/u2) and filesystem
+// uploads (/ufsu), and uses Web.upload_file_type to distinguish them.
+// When uploading via the web UI, the browser first does a GET which calls
+// UfsDirectory() and sets upload_file_type = UPL_UFSFILE. But direct POST
+// requests (e.g. curl -F "file=@..." /ufsu) skip the GET, leaving
+// upload_file_type unset and causing HandleUploadLoop() to treat the file
+// as a firmware image, which fails.
+// This wrapper ensures upload_file_type is always set before entering the
+// shared upload handler.
+void HandleUploadUFSLoop(void) {
+  Web.upload_file_type = UPL_UFSFILE;
+  HandleUploadLoop();
+}
 
 void HandleUploadUFSDone(void) {
   if (!HttpCheckPriviledgedAccess()) { return; }
@@ -1370,7 +1397,7 @@ void HandleUploadUFSDone(void) {
   }
   WSContentSend_P(PSTR("</div><br>"));
 
-  XdrvCall(FUNC_WEB_ADD_MANAGEMENT_BUTTON);
+  WSContentSend_PD(UFS_WEB_DIR, "/", PSTR(D_MANAGE_FILE_SYSTEM));
 
   WSContentStop();
 }
@@ -1427,7 +1454,8 @@ void UfsDirectory(void) {
 
   WSContentStart_P(PSTR(D_MANAGE_FILE_SYSTEM));
   WSContentSendStyle();
-  WSContentSend_P(UFS_FORM_FILE_UPLOAD);
+  WSContentSend_P(HTTP_DIV_F1_BLOCK);
+  WSContentSend_P(HTTP_FIELDSET_LEGEND, PSTR(D_MANAGE_FILE_SYSTEM));
 
   char ts[FLOATSZ];
   dtostrfd((float)UfsInfo(0, ufs_dir == 2 ? 1:0) / 1000, 3, ts);
@@ -1455,6 +1483,7 @@ void UfsDirectory(void) {
   }
   WSContentSend_P(UFS_FORM_SDC_DIRc);
 #ifdef GUI_EDIT_FILE
+  WSContentSend_P(HTTP_FORM_GET_ACTION, PSTR("ufse"));
   WSContentSend_P(UFS_FORM_FILE_UPGb, ufs_path);
 #endif
   if (!UfsIsSDC()) {
@@ -1756,6 +1785,7 @@ void UfsEditor(void) {
 
   WSContentStart_P(PSTR(D_EDIT_FILE));
   WSContentSendStyle();
+  WSContentSend_P(HTTP_FIELDSET_LEGEND, PSTR(D_EDIT_FILE));
   char *bfname = fname +1;
   WSContentSend_P(HTTP_EDITOR_FORM_START, bfname);  // Skip leading slash
 
@@ -1959,13 +1989,9 @@ bool Xdrv50(uint32_t function) {
       }
       break;
     case FUNC_WEB_ADD_HANDLER:
-//      Webserver->on(F("/ufsd"), UfsDirectory);
-//      Webserver->on(F("/ufsu"), HTTP_GET, UfsDirectory);
-//      Webserver->on(F("/ufsu"), HTTP_POST,[](){Webserver->sendHeader(F("Location"),F("/ufsu"));Webserver->send(303);}, HandleUploadLoop);
       Webserver->on("/ufsd", UfsDirectory);
       Webserver->on("/ufsu", HTTP_GET, UfsDirectory);
-      //Webserver->on("/ufsu", HTTP_POST,[](){Webserver->sendHeader(F("Location"),F("/ufsu"));Webserver->send(303);}, HandleUploadLoop);
-      Webserver->on("/ufsu", HTTP_POST, HandleUploadUFSDone, HandleUploadLoop);
+      Webserver->on("/ufsu", HTTP_POST, HandleUploadUFSDone, HandleUploadUFSLoop);
 #ifdef GUI_EDIT_FILE
       Webserver->on("/ufse", HTTP_GET, UfsEditor);
       Webserver->on("/ufse", HTTP_POST, UfsEditorUpload);

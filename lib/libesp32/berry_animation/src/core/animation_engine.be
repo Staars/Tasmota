@@ -1,14 +1,17 @@
 # Unified Animation Engine
 #
-# Uses composition pattern: contains a root EngineProxy that manages all children.
+# Uses composition pattern: contains a root engine_proxy that manages all children.
 # The engine provides infrastructure (strip output, fast_loop) while delegating
 # child management and rendering to the root animation.
 
 class AnimationEngine
+  # Minimum milliseconds between ticks
+  static var TICK_MS = 50
+  
   # Core properties
   var strip                 # LED strip object
   var strip_length          # Strip length (cached for performance)
-  var root_animation        # Root EngineProxy that holds all children
+  var root_animation        # Root engine_proxy that holds all children
   var frame_buffer          # Main frame buffer
   var temp_buffer           # Temporary buffer for blending
   
@@ -17,6 +20,7 @@ class AnimationEngine
   var last_update           # Last update time in milliseconds
   var time_ms               # Current time in milliseconds (updated each frame)
   var fast_loop_closure     # Stored closure for fast_loop registration
+  var tick_ms               # Minimum milliseconds between ticks (runtime configurable)
   
   # Performance optimization
   var render_needed         # Whether a render pass is needed
@@ -68,15 +72,15 @@ class AnimationEngine
     self.frame_buffer = animation.frame_buffer(self.strip_length)
     self.temp_buffer = animation.frame_buffer(self.strip_length)
     
-    # Create root EngineProxy to manage all children
+    # Create root engine_proxy to manage all children
     self.root_animation = animation.engine_proxy(self)
-    self.root_animation.name = "root"
     
     # Initialize state
     self.is_running = false
     self.last_update = 0
     self.time_ms = 0
     self.fast_loop_closure = nil
+    self.tick_ms = self.TICK_MS  # Initialize from static default
     self.render_needed = false
     
     # Initialize CPU metrics
@@ -151,7 +155,7 @@ class AnimationEngine
   
   # Add an animation or sequence to the root animation
   # 
-  # @param obj: Animation|SequenceManager - The object to add
+  # @param obj: Animation|sequence_manager - The object to add
   # @return bool - True if added, false if already exists
   def add(obj)
     var ret = self.root_animation.add(obj)
@@ -163,7 +167,7 @@ class AnimationEngine
   
   # Remove an animation or sequence from the root animation
   # 
-  # @param obj: Animation|SequenceManager - The object to remove
+  # @param obj: Animation|sequence_manager - The object to remove
   # @return bool - True if removed, false if not found
   def remove(obj)
     var ret = self.root_animation.remove(obj)
@@ -187,24 +191,24 @@ class AnimationEngine
       return false
     end
     
-    # Start timing this tick
-    self.ts_start = tasmota.millis()
-    
     if current_time == nil
-      current_time = self.ts_start
+      current_time = tasmota.millis()
     end
+    
+    # Throttle updates based on tick_ms setting
+    var delta_time = current_time - self.last_update
+    if delta_time < self.tick_ms
+      return true
+    end
+    
+    # Start timing this tick (use tasmota.millis() for consistent profiling)
+    self.ts_start = tasmota.millis()
     
     # Check if strip length changed since last time
     self.check_strip_length()
     
     # Update engine time
     self.time_ms = current_time
-    
-    # Throttle updates to ~5ms intervals
-    var delta_time = current_time - self.last_update
-    if delta_time < 5
-      return true
-    end
     
     self.last_update = current_time
     
@@ -440,7 +444,7 @@ class AnimationEngine
     # var cpu_percent = (self.tick_time_sum * 100) / period_ms
     
     # Format and log stats - split into animation calc vs hardware output
-    var stats_msg = f"AnimEngine: ticks={self.tick_count} total={mean_time:.2f}ms({self.tick_time_min}-{self.tick_time_max}) events={mean_phase1:.2f}ms({self.phase1_time_min}-{self.phase1_time_max}) update={mean_phase2:.2f}ms({self.phase2_time_min}-{self.phase2_time_max}) anim={mean_anim:.2f}ms({self.anim_time_min}-{self.anim_time_max}) hw={mean_hw:.2f}ms({self.hw_time_min}-{self.hw_time_max})"
+    var stats_msg = f"ANI: ticks={self.tick_count} total={mean_time:.2f}ms({self.tick_time_min}-{self.tick_time_max}) events={mean_phase1:.2f}ms({self.phase1_time_min}-{self.phase1_time_max}) update={mean_phase2:.2f}ms({self.phase2_time_min}-{self.phase2_time_max}) anim={mean_anim:.2f}ms({self.anim_time_min}-{self.anim_time_max}) hw={mean_hw:.2f}ms({self.hw_time_min}-{self.hw_time_max})"
     tasmota.log(stats_msg, 3)  # Log level 3 (DEBUG)
   end
   
@@ -450,11 +454,11 @@ class AnimationEngine
   end
   
   # Interrupt specific animation by name
-  def interrupt_animation(name)
+  def interrupt_animation(id)
     var i = 0
     while i < size(self.root_animation.children)
       var child = self.root_animation.children[i]
-      if isinstance(child, animation.animation) && child.name != nil && child.name == name
+      if isinstance(child, animation.animation) && child.id == id
         child.stop()
         self.root_animation.children.remove(i)
         return
@@ -545,7 +549,7 @@ class AnimationEngine
     self.strip = nil
   end
   
-  # Sequence iteration tracking methods, delegate to EngineProxy
+  # Sequence iteration tracking methods, delegate to engine_proxy
   
   # Push a new iteration context onto the stack
   # Called when a sequence starts repeating
@@ -570,7 +574,7 @@ class AnimationEngine
   end
   
   # Get the current iteration number from the innermost sequence context
-  # Used by IterationNumberProvider to return the current iteration
+  # Used by iteration_number to return the current iteration
   #
   # @return int|nil - Current iteration number (0-based) or nil if not in sequence
   def get_current_iteration_number()

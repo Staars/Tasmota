@@ -28,7 +28,7 @@
  * Use online command StateText to translate ON, OFF, HOLD and TOGGLE.
  * Use online command Prefix to translate cmnd, stat and tele.
  *
- * Updated until v9.4.0.1 - Last update 28.07.2025
+ * Updated until v9.4.0.1 - Last update 06.03.2026
 \*********************************************************************/
 
 #define LANGUAGE_MODULE_NAME         // Enable to display "Module Generic" (ie Spanish), Disable to display "Generic Module" (ie English)
@@ -118,6 +118,7 @@
 #define D_GATEWAY              "Gateway"
 #define D_GROUP                "Gruppo"
 #define D_HALL_EFFECT          "Effetto hall"
+#define D_HCHO                 "Formaldeide"
 #define D_HEATINDEX            "Indice calore"
 #define D_HOST                 "Host"
 #define D_HOSTNAME             "Nome host"
@@ -348,6 +349,7 @@
 
 #define D_OTHER_PARAMETERS    "Altri parametri"
 #define D_TEMPLATE            "Modello"
+#define D_TEMPLATE_WRONG_ARCH "Ripristina tipo chip corretto"
 #define D_ACTIVATE            "Attiva"
 #define D_DEVICE_NAME         "Nome dispositivo"
 #define D_WEB_ADMIN_PASSWORD  "Password amministratore web"
@@ -541,6 +543,10 @@
 #define D_ENERGY_TODAY                    "Energia - oggi"
 #define D_ENERGY_YESTERDAY                "Energia - ieri"
 #define D_ENERGY_TOTAL                    "Energia - totale"
+
+// xdrv_92_vid6608.ino
+#define D_VID6608_F "VID6608 F"
+#define D_VID6608_CW "VID6608 CW"
 
 // xsns_100_ina3221.ino
 #define  D_UNIT_CHARGE                    "Ah"
@@ -1038,6 +1044,8 @@
 #define D_SENSOR_WOOLIIS_RX             "Wooliis - RX"
 #define D_SENSOR_C8_CO2_5K_RX           "C8-CO2-5K - RX"
 #define D_SENSOR_C8_CO2_5K_TX           "C8-CO2-5K - TX"
+#define D_SENSOR_MKSKYBLU_TX            "MkSkyBlu - TX"
+#define D_SENSOR_MKSKYBLU_RX            "MkSkyBlu - RX"
 
 // Units
 #define D_UNIT_AMPERE                     "A"

@@ -118,6 +118,7 @@
 #define D_GATEWAY "Tinklo vartai"
 #define D_GROUP "Grupė"
 #define D_HALL_EFFECT "Holo efektas"
+#define D_HCHO "Formaldehyde"
 #define D_HEATINDEX "Karščio indeksas"
 #define D_HOST "Serveris"
 #define D_HOSTNAME "Mazgo pavadinimas"
@@ -348,6 +349,7 @@
 
 #define D_OTHER_PARAMETERS "Kiti parametrai"
 #define D_TEMPLATE "Šablonas"
+#define D_TEMPLATE_WRONG_ARCH "Reset to correct chip type"
 #define D_ACTIVATE "Aktyvuoti"
 #define D_DEVICE_NAME "Įrenginio pavadinimas"
 #define D_WEB_ADMIN_PASSWORD "Web administratoriaus slaptažodis"
@@ -542,6 +544,10 @@
 #define D_ENERGY_YESTERDAY "Energija vakar"
 #define D_ENERGY_TOTAL "Bendra energija"
   
+// xdrv_92_vid6608.ino
+#define D_VID6608_F "VID6608 F"
+#define D_VID6608_CW "VID6608 CW"
+
 // xsns_100_ina3221.ino
 #define  D_UNIT_CHARGE                    "Ah"
 #define  D_CHARGE                         "Įkrova"    
@@ -1038,6 +1044,8 @@
 #define D_SENSOR_WOOLIIS_RX    "Wooliis Rx"
 #define D_SENSOR_C8_CO2_5K_RX  "C8-CO2-5K Rx"
 #define D_SENSOR_C8_CO2_5K_TX  "C8-CO2-5K Tx"
+#define D_SENSOR_MKSKYBLU_TX   "MkSkyBlu Tx"
+#define D_SENSOR_MKSKYBLU_RX   "MkSkyBlu Rx"
 
 // Units
 #define D_UNIT_AMPERE "A"
