@@ -112,7 +112,7 @@ The latter links can be used for OTA upgrades too like ``OtaUrl https://ota.tasm
 
 [Complete list](BUILDS.md) of available feature and sensors.
 
-## Changelog v15.3.0.2
+## Changelog v15.3.0.3
 ### Added
 - Support for JSON value pair `"ARCH"` in template being either ESP8266, ESP32, ESP32C2, ESP32C3, ESP32C5, ESP32C6, ESP32H2, ESP32H4, ESP32P4, ESP32S2 or ESP32S3
 - Support for Sensirion SCD42 and SCD43 CO2 sensor
@@ -126,6 +126,8 @@ The latter links can be used for OTA upgrades too like ``OtaUrl https://ota.tasm
 - Berry add `loglevel` to `mqtt.publish()` [#24551](https://github.com/arendst/Tasmota/issues/24551)
 
 ### Changed
+- ESP8266 platform update from 2026.02.00 to 2026.03.00 [#24547](https://github.com/arendst/Tasmota/issues/24547)
+- ESP32 Platform from 2025.02.30 to 2026.03.30, Framework (Arduino Core) from v3.1.9 to v3.1.10 and IDF from v5.3.4.251226 to v5.3.4.260127 [#24547](https://github.com/arendst/Tasmota/issues/24547)
 - Adafruit_BusIO library from v1.11.0 to v1.17.4
 - Adafruit_CCS811 library from v1.0.0.14 to v1.1.3
 - Adafruit SGP30 library from v1.2.0 to v2.0.3
@@ -136,6 +138,7 @@ The latter links can be used for OTA upgrades too like ``OtaUrl https://ota.tasm
 - Matter improved parameters handling [#24471](https://github.com/arendst/Tasmota/issues/24471)
 
 ### Fixed
+- ESP8266 heap drain and exception 29 when DHCP provides NTP server [#24515](https://github.com/arendst/Tasmota/issues/24515)
 - Crash when shutting down Wifi with `Wifi 0` [#24536](https://github.com/arendst/Tasmota/issues/24536)
 - Do not free BT memory when in use [#24480](https://github.com/arendst/Tasmota/issues/24480)
 - Berry avoid `tasmota.wifi()` returning bad values when wifi is turned off [#24505](https://github.com/arendst/Tasmota/issues/24505)
