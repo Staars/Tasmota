@@ -112,21 +112,34 @@ The latter links can be used for OTA upgrades too like ``OtaUrl https://ota.tasm
 
 [Complete list](BUILDS.md) of available feature and sensors.
 
-## Changelog v15.3.0.1
+## Changelog v15.3.0.3
 ### Added
 - Support for JSON value pair `"ARCH"` in template being either ESP8266, ESP32, ESP32C2, ESP32C3, ESP32C5, ESP32C6, ESP32H2, ESP32H4, ESP32P4, ESP32S2 or ESP32S3
 - Support for Sensirion SCD42 and SCD43 CO2 sensor
 - Support for Sensirion STCC4 CO2 sensor
+- ESP8266 redesigned I2C Wire driver to support second I2C bus
+- Environment sensors CCS811, SGP30 and SGP40 second I2C bus support
+- Real Time Clocks BM8563, PCF85063 and PCF85363 second I2C bus support
+- LCD second I2C bus support
 - I2S full duplex, auto rx sample rate [#24469](https://github.com/arendst/Tasmota/issues/24469)
 - Sen5x power on delay of 60ms [#24452](https://github.com/arendst/Tasmota/issues/24452)
+- Berry add `loglevel` to `mqtt.publish()` [#24551](https://github.com/arendst/Tasmota/issues/24551)
 
 ### Changed
+- ESP8266 platform update from 2026.02.00 to 2026.03.00 [#24547](https://github.com/arendst/Tasmota/issues/24547)
+- ESP32 Platform from 2025.02.30 to 2026.03.30, Framework (Arduino Core) from v3.1.9 to v3.1.10 and IDF from v5.3.4.251226 to v5.3.4.260127 [#24547](https://github.com/arendst/Tasmota/issues/24547)
+- Adafruit_BusIO library from v1.11.0 to v1.17.4
+- Adafruit_CCS811 library from v1.0.0.14 to v1.1.3
+- Adafruit SGP30 library from v1.2.0 to v2.0.3
+- Adafruit SGP40 library from v1.1.0 to v1.1.4
 - Sensirion Core library from v0.6.0 to v0.7.2
 - LVGL library from v9.4.0 to v9.5.0 [#24470](https://github.com/arendst/Tasmota/issues/24470)
 - SHT1x software reset I2C bus after initial (un)detection
 - Matter improved parameters handling [#24471](https://github.com/arendst/Tasmota/issues/24471)
 
 ### Fixed
+- ESP8266 heap drain and exception 29 when DHCP provides NTP server [#24515](https://github.com/arendst/Tasmota/issues/24515)
+- Crash when shutting down Wifi with `Wifi 0` [#24536](https://github.com/arendst/Tasmota/issues/24536)
 - Do not free BT memory when in use [#24480](https://github.com/arendst/Tasmota/issues/24480)
 - Berry avoid `tasmota.wifi()` returning bad values when wifi is turned off [#24505](https://github.com/arendst/Tasmota/issues/24505)
 - Don't send extraneous `0\r\n\r\n` with non-chunked HTTP/1.0 [#24518](https://github.com/arendst/Tasmota/issues/24518)
@@ -134,3 +147,4 @@ The latter links can be used for OTA upgrades too like ``OtaUrl https://ota.tasm
 
 ### Removed
 - Berry `tasmota.urlbecload()` superseded by Extension Manager [#24493](https://github.com/arendst/Tasmota/issues/24493)
+- Berry remove `mdns.stop()` [#24549](https://github.com/arendst/Tasmota/issues/24549)
