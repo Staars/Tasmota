@@ -1288,7 +1288,8 @@ class Matter_Plugin_Root : Matter_Plugin
         import global
         log("MTR: ConnectNetwork deferred, waiting for WiFi", 2)
         global.matter_device.deferred_connect_network = ctx.msg
-        return false
+        ctx.status = nil
+        return nil
       end
 
     else
