@@ -96,7 +96,7 @@ typedef enum {
 
 /*********************************************************************************************/
 
-// Configuration - what Berry tells us about the sensor (28 bytes)
+// Configuration - what Berry tells us about the sensor (32 bytes)
 struct CSI_Config {
   uint16_t width;           // 0-1: Active pixels per line
   uint16_t height;          // 2-3: Active lines per frame
@@ -111,11 +111,11 @@ struct CSI_Config {
   uint8_t fps;              // 17: Target FPS (e.g., 30)
   char name[8];             // 18-25: Sensor name (null-terminated)
   uint8_t res_index;        // 26: Resolution Index (0-255)
-  uint8_t flags;            // 27: Bitmask (Bit 0=V-Flip, Bit 1=H-Mirror)
+  uint8_t flags;            // 27: Opaque command byte staged from WcFlags, interpreted by Berry sensor drivers
+  uint8_t bayer_order;      // 28: Bayer order (0=BGGR, 1=GBRG, 2=GRBG, 3=RGGB) - written by Berry, consumed by ISP
+  uint8_t reserved;         // 29: Reserved for future use
+  uint8_t _pad[2];          // 30-31: Padding to 32 bytes
 } __attribute__((packed));
-
-#define CSI_FLAG_VFLIP    (1 << 0)
-#define CSI_FLAG_HMIRROR  (1 << 1)
 
 // Runtime state - handles and buffers
 struct {
@@ -212,20 +212,17 @@ struct {
   uint32_t start_time;         // millis() when streaming started
   
   // Detailed timing breakdown (in microseconds for precision)
-  uint32_t last_mutex_wait_us;      // Time waiting for frame_mutex
   uint32_t last_cache_sync_us;      // Cache sync duration
   uint32_t last_jpeg_encode_us;     // JPEG encoding duration
   uint32_t last_network_write_us;   // Network transmission duration
   uint32_t last_jpeg_mutex_wait_us; // Time waiting for jpeg_mutex
   
   // Averages over last second
-  uint32_t avg_mutex_wait_us;
   uint32_t avg_cache_sync_us;
   uint32_t avg_jpeg_encode_us;
   uint32_t avg_network_write_us;
   
   // Max values (to catch spikes)
-  uint32_t max_mutex_wait_us;
   uint32_t max_jpeg_encode_us;
   uint32_t max_network_write_us;
   
@@ -253,12 +250,13 @@ bool WcIspApplyConfig(isp_proc_handle_t handle, const char* sensor_name, int wid
 #define D_CMND_WC_WINDOW "Window"
 #define D_CMND_WC_QUALITY "Quality"
 #define D_CMND_WC_SESSION "Session"
+#define D_CMND_WC_FLAGS "Flags"
 
 const char kWCCommands[] PROGMEM = D_PREFX_WEBCAM "|"
-  D_CMND_WC_RES "|" D_CMND_WC_STREAM "|" D_CMND_WC_STOP "|" D_CMND_WC_STATUS "|" D_CMND_WC_CONFIG "|" D_CMND_WC_WINDOW "|" D_CMND_WC_QUALITY "|" D_CMND_WC_SESSION;
+  D_CMND_WC_RES "|" D_CMND_WC_STREAM "|" D_CMND_WC_STOP "|" D_CMND_WC_STATUS "|" D_CMND_WC_CONFIG "|" D_CMND_WC_WINDOW "|" D_CMND_WC_QUALITY "|" D_CMND_WC_SESSION "|" D_CMND_WC_FLAGS;
 
 void (* const WCCommand[])(void) PROGMEM = {
-  &CmndWcRes, &CmndWcStream, &CmndWcStop, &CmndWcStatus, &CmndWcConfig, &CmndWcWindow, &CmndWcQuality, &CmndWcSession
+  &CmndWcRes, &CmndWcStream, &CmndWcStop, &CmndWcStatus, &CmndWcConfig, &CmndWcWindow, &CmndWcQuality, &CmndWcSession, &CmndWcFlags
 };
 
 /*********************************************************************************************/
@@ -374,7 +372,7 @@ uint32_t WcInitPipeline() {
   // 1. Allocate Frame Buffers
   Wc.core.frame_buffer_size = Wc.core.config.width * Wc.core.config.height * 2;
   for (int i = 0; i < 2; i++) {
-    Wc.core.frame_buffer[i] = (uint8_t*)heap_caps_aligned_calloc(64, 1, Wc.core.frame_buffer_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    Wc.core.frame_buffer[i] = (uint8_t*)heap_caps_aligned_calloc(128, 1, Wc.core.frame_buffer_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!Wc.core.frame_buffer[i]) {
       AddLog(LOG_LEVEL_ERROR, PSTR("CAM: Frame buffer %d allocation failed"), i);
       WcSetFailed(CAM_FAIL_MEMORY);
@@ -426,6 +424,10 @@ uint32_t WcInitPipeline() {
   // 4. ISP — always created here with correct output format for session type
   {
     isp_color_t isp_output_format = (Wc.core.session_type == SESSION_RTSP_AND_WS || Wc.core.session_type == SESSION_WEBRTC) ? ISP_COLOR_YUV420 : ISP_COLOR_YUV422;
+    color_raw_element_order_t bayer = COLOR_RAW_ELEMENT_ORDER_BGGR;
+    if (Wc.core.config.bayer_order <= 3) {
+      bayer = (color_raw_element_order_t)Wc.core.config.bayer_order;
+    }
     esp_isp_processor_cfg_t isp_config = {
       .clk_hz = 120 * 1000 * 1000,
       .input_data_source = ISP_INPUT_DATA_SOURCE_CSI,
@@ -433,6 +435,7 @@ uint32_t WcInitPipeline() {
       .output_data_color_type = isp_output_format,
       .h_res = Wc.core.config.width,
       .v_res = Wc.core.config.height,
+      .bayer_order = bayer,
     };
     ret = esp_isp_new_processor(&isp_config, &Wc.core.isp_handle);
     if (ret != ESP_OK) {

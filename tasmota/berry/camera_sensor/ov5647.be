@@ -3,6 +3,11 @@ class CSI_Sensor
   var name
   var wire
   var addr
+  var is_streaming
+  var is_initialized
+  var width, height
+  var mipi_clock
+  var format, bin_mode
   
   static REG_END = 0xFFFF
   static REG_DELAY = 0xFFFE
@@ -60,20 +65,12 @@ end
 class OV5647 : CSI_Sensor
   static ADDR = 0x36
   static CHIP_ID = 0x5647
-  var is_streaming
-  var is_initialized
-  var width, height
-  var mipi_clock      # Mbps per lane (passed to C++ as CSI_Config.mipi_clock)
-  var format, bin_mode
   
   def init()
     super(self).init("OV5647", self.ADDR)
-    self.is_streaming = false
-    self.is_initialized = false
     self.width = 640
     self.height = 480
     self.mipi_clock = 291
-    self.format = 1
     self.bin_mode = 2
   end
   
@@ -179,7 +176,7 @@ class OV5647 : CSI_Sensor
        var start_x = (max_w - w) / 2 + x
        var start_y = (max_h - h) / 2 + y
        # Offsets for ISP/Bayer alignment
-       var off_x = 9 + start_x
+       var off_x = 8 + start_x
        var off_y = 0 + start_y
        
        var hts = 1896
@@ -318,6 +315,25 @@ class OV5647 : CSI_Sensor
     end
   end
 
+  # Apply flip/mirror flags, write sensor registers, return bayer_order
+  # flags: Bit 0=V-Flip, Bit 1=H-Mirror
+  def flip(flags)
+    var hmirror = (flags >> 1) & 1
+    var vflip = flags & 1
+    # OV5647: 0x3820 bit1=vflip, 0x3821 bit1=hmirror (preserve other bits)
+    var reg3820 = self.read_reg16(0x3820)
+    var reg3821 = self.read_reg16(0x3821)
+    if reg3820 != nil && reg3821 != nil
+      if vflip  reg3820 = reg3820 | 0x02  else  reg3820 = reg3820 & 0xFD  end
+      if hmirror  reg3821 = reg3821 | 0x02  else  reg3821 = reg3821 & 0xFD  end
+      self.write_reg16(0x3820, reg3820)
+      self.write_reg16(0x3821, reg3821)
+    end
+    # Bayer order LUT indexed by orient = (vflip<<1)|hmirror
+    var bayer_lut = [0, 1, 2, 3]
+    return bayer_lut[(vflip << 1) | hmirror]
+  end
+
   def camera(cmd, idx, payload, raw)
     if cmd == "init"
       print("OV5647: ========== INIT ==========")
@@ -336,7 +352,7 @@ class OV5647 : CSI_Sensor
       if idx != 0
         import introspect
         var p = introspect.toptr(idx)
-        var b = bytes(p, 28)
+        var b = bytes(p, 32)
         res_idx = b[26]
         
         if res_idx == 255 # Manual
@@ -364,7 +380,7 @@ class OV5647 : CSI_Sensor
       if idx != 0
         import introspect
         var p = introspect.toptr(idx)
-        var b = bytes(p, 28)
+        var b = bytes(p, 32)
         b.set(0, self.width, 2)
         b.set(2, self.height, 2)
         b.set(4, 2592, 2)
@@ -375,6 +391,7 @@ class OV5647 : CSI_Sensor
         b[16] = self.bin_mode
         b[17] = req_fps
         b.setbytes(18, bytes().fromstring("OV5647"))
+        b[28] = self.flip(b[27])
       end
       
       return 1

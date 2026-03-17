@@ -112,15 +112,9 @@ void MjpegProcessingTask(void *pvParameters) {
     uint32_t frame_start = millis();
     
     // Lock frame access to prevent race with WcLoop
-    uint32_t mutex_start = micros();
     if (xSemaphoreTake(Wc.core.frame_mutex, pdMS_TO_TICKS(100)) != pdTRUE) {
       WcStats.frames_unsent++;
       continue;
-    }
-    
-    WcStats.last_mutex_wait_us = micros() - mutex_start;
-    if (WcStats.last_mutex_wait_us > WcStats.max_mutex_wait_us) {
-      WcStats.max_mutex_wait_us = WcStats.last_mutex_wait_us;
     }
     
     // Check state after acquiring mutex - exit quickly if stopping
@@ -238,7 +232,6 @@ void MjpegProcessingTask(void *pvParameters) {
       
       // Calculate averages (if we processed frames)
       if (frames_in_second > 0) {
-        WcStats.avg_mutex_wait_us = WcStats.last_mutex_wait_us;
         WcStats.avg_cache_sync_us = WcStats.last_cache_sync_us;
         WcStats.avg_jpeg_encode_us = WcStats.last_jpeg_encode_us;
         WcStats.avg_network_write_us = WcStats.last_network_write_us;
@@ -256,13 +249,12 @@ void MjpegProcessingTask(void *pvParameters) {
     
     // Periodic profiling log (every 5 seconds)
     if (millis() - last_profile_log >= 5000) {
-      AddLog(LOG_LEVEL_INFO, PSTR("CAM: Profile - JPEG:%uus(%uKB,%.2fx) Net:%uus Cache:%uus Mutex:%uus FPS:%u"),
+      AddLog(LOG_LEVEL_INFO, PSTR("CAM: Profile - JPEG:%uus(%uKB,%.2fx) Net:%uus Cache:%uus FPS:%u"),
         WcStats.last_jpeg_encode_us,
         WcStats.last_jpeg_size / 1024,
         WcStats.compression_ratio_x100 / 100.0f,
         WcStats.last_network_write_us,
         WcStats.last_cache_sync_us,
-        WcStats.last_mutex_wait_us,
         WcStats.last_fps);
       last_profile_log = millis();
     }
@@ -355,8 +347,12 @@ void HandleImage(void) {
     return;
   }
 
-  // Wait for next frame (simple delay to let task process)
-  delay(100);
+  // Wait for a fresh frame (poll frames_captured with yielding)
+  uint32_t baseline = WcStats.frames_captured;
+  uint32_t deadline = millis() + 200;
+  while (WcStats.frames_captured == baseline && millis() < deadline) {
+    vTaskDelay(pdMS_TO_TICKS(5));
+  }
   
   // Lock JPEG encoder to prevent race with CamProcessingTask
   if (xSemaphoreTake(Wc.jpeg.mutex, pdMS_TO_TICKS(200)) == pdTRUE) {

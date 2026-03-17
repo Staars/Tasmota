@@ -3,6 +3,11 @@ class CSI_Sensor
   var name
   var wire
   var addr
+  var is_streaming
+  var is_initialized
+  var width, height
+  var mipi_clock
+  var format, bin_mode
   
   static REG_END = 0xFFFF
   static REG_DELAY = 0xFFFE
@@ -60,21 +65,13 @@ end
 class IMX219 : CSI_Sensor
   static ADDR = 0x10
   static CHIP_ID = 0x0219
-  var is_streaming
-  var is_initialized
-  var width, height
-  var mipi_clock      # Mbps per lane (passed to C++ as CSI_Config.mipi_clock)
-  var format, bin_mode
   
   def init()
     super(self).init("IMX219", self.ADDR)
-    self.is_streaming = false
-    self.is_initialized = false
     self.width = 640
     self.height = 480
     self.mipi_clock = 456
-    self.format = 1 
-    self.bin_mode = 2 
+    self.bin_mode = 2
   end
   
   def detect()
@@ -194,9 +191,7 @@ class IMX219 : CSI_Sensor
       [0x016c, (w>>8)], [0x016d, (w&0xFF)],   
       [0x016e, (h>>8)], [0x016f, (h&0xFF)],
       
-      # FIX COLOR SWAP (Red/Blue) by rotating readout
-      [0x0172, 0x03], 
-      
+      [0x0172, 0x00],
       [0x0174, reg_bin], [0x0175, reg_bin],
       [0x018c, reg_fmt], [0x018d, reg_fmt],
       [0x0309, reg_oppxck], 
@@ -218,6 +213,19 @@ class IMX219 : CSI_Sensor
       
       [self.REG_END, 0x00]
     ]
+  end
+
+  # Apply flip/mirror flags, write sensor registers, return bayer_order
+  # flags: Bit 0=V-Flip, Bit 1=H-Mirror
+  def flip(flags)
+    var hmirror = (flags >> 1) & 1
+    var vflip = flags & 1
+    # IMX219 0x0172: bit0=hmirror, bit1=vflip (per datasheet)
+    self.write_reg16(0x0172, (vflip << 1) | hmirror)
+    # Bayer order LUT indexed by orient = (vflip<<1)|hmirror
+    # Per Linux kernel: RGGB(3), GRBG(2), GBRG(1), BGGR(0)
+    var bayer_lut = [3, 2, 1, 0]
+    return bayer_lut[(vflip << 1) | hmirror]
   end
 
   def camera(cmd, idx, payload, raw)
@@ -242,7 +250,7 @@ class IMX219 : CSI_Sensor
       if idx != 0
         import introspect
         var p = introspect.toptr(idx)
-        var b = bytes(p, 28)
+        var b = bytes(p, 32)
         res_idx = b[26]
         
         if res_idx == 255
@@ -275,7 +283,7 @@ class IMX219 : CSI_Sensor
       if idx != 0
         import introspect
         var p = introspect.toptr(idx)
-        var b = bytes(p, 28)
+        var b = bytes(p, 32)
         b.set(0, self.width, 2)
         b.set(2, self.height, 2)
         b.set(4, 3280, 2)
@@ -286,6 +294,7 @@ class IMX219 : CSI_Sensor
         b[16] = self.bin_mode
         b[17] = req_fps       # CRITICAL for RTSP
         b.setbytes(18, bytes().fromstring("IMX219"))
+        b[28] = self.flip(b[27])
       end
       
       print("IMX219: ========== INIT COMPLETE ==========")

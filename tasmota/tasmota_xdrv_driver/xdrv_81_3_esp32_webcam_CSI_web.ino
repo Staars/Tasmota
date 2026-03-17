@@ -438,8 +438,8 @@ void CmndWcStatus(void) {
                   "\"JpegErrors\":%u,\"JpegResets\":%u,\"BytesSent\":%u,"
                   "\"UptimeSeconds\":%u,\"FPS\":%u,\"LastFrameTimeMs\":%u,"
                   "\"Timing\":{"
-                  "\"MutexWaitUs\":%u,\"CacheSyncUs\":%u,\"JpegEncodeUs\":%u,\"NetworkWriteUs\":%u,"
-                  "\"MaxMutexUs\":%u,\"MaxJpegUs\":%u,\"MaxNetworkUs\":%u"
+                  "\"CacheSyncUs\":%u,\"JpegEncodeUs\":%u,\"NetworkWriteUs\":%u,"
+                  "\"MaxJpegUs\":%u,\"MaxNetworkUs\":%u"
                   "},"
                   "\"JPEG\":{"
                   "\"LastSize\":%u,\"AvgSize\":%u,\"MinSize\":%u,\"MaxSize\":%u,\"CompressionRatio\":\"%.2f\""
@@ -458,11 +458,9 @@ void CmndWcStatus(void) {
              WcStats.uptime_seconds,
              WcStats.last_fps,
              WcStats.last_frame_time_ms,
-             WcStats.last_mutex_wait_us,
              WcStats.last_cache_sync_us,
              WcStats.last_jpeg_encode_us,
              WcStats.last_network_write_us,
-             WcStats.max_mutex_wait_us,
              WcStats.max_jpeg_encode_us,
              WcStats.max_network_write_us,
              WcStats.last_jpeg_size,
@@ -476,7 +474,7 @@ void CmndWcStatus(void) {
 
 void CmndWcConfig(void) {
   AddLog(LOG_LEVEL_INFO, PSTR("CAM: WcConfig called"));
-  Response_P(PSTR("{\"WcConfig\":{\"Sensor\":\"%.8s\",\"Width\":%d,\"Height\":%d,\"MaxWidth\":%d,\"MaxHeight\":%d,\"Format\":%d,\"MipiClock\":%d,\"Lanes\":%d,\"OffsetX\":%d,\"OffsetY\":%d,\"Binning\":%d,\"FPS\":%d,\"ResIndex\":%d,\"Flags\":\"0x%02X\"}}"),
+  Response_P(PSTR("{\"WcConfig\":{\"Sensor\":\"%.8s\",\"Width\":%d,\"Height\":%d,\"MaxWidth\":%d,\"MaxHeight\":%d,\"Format\":%d,\"MipiClock\":%d,\"Lanes\":%d,\"OffsetX\":%d,\"OffsetY\":%d,\"Binning\":%d,\"FPS\":%d,\"ResIndex\":%d,\"Flags\":\"0x%02X\",\"BayerOrder\":%d}}"),
              Wc.core.config.name,
              Wc.core.config.width,
              Wc.core.config.height,
@@ -490,7 +488,8 @@ void CmndWcConfig(void) {
              Wc.core.config.binning,
              Wc.core.config.fps,
              Wc.core.config.res_index,
-             Wc.core.config.flags);
+             Wc.core.config.flags,
+             Wc.core.config.bayer_order);
 }
 
 void CmndWcQuality(void) {
@@ -603,6 +602,17 @@ void CmndWcSession(void) {
              Wc.core.session_type, session_names[Wc.core.session_type]);
 }
 
+
+void CmndWcFlags(void) {
+  if (XdrvMailbox.payload < 0) {
+    ResponseCmndNumber(Wc.core.config.flags);
+    return;
+  }
+
+  Wc.core.config.flags = (uint8_t)XdrvMailbox.payload;
+  AddLog(LOG_LEVEL_INFO, PSTR("CAM: Flags staged: 0x%02X (applied on next WcRes/WcWindow)"), Wc.core.config.flags);
+  ResponseCmndNumber(Wc.core.config.flags);
+}
 
 // Web UI Strings
 const char HTTP_WC_MODE[] PROGMEM = "{s}Camera Mode{m}%s{e}";
