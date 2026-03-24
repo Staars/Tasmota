@@ -1245,6 +1245,11 @@ void PerformEverySecond(void)
 #ifdef ESP8266
   // Wifi keep alive to send Gratuitous ARP
   wifiKeepAlive();
+
+  if (0 == (TasmotaGlobal.uptime % 60)) {  // Perform every minute
+    // We do not want core SNTP server which uses DHCP to find NTP server(s). See #24515
+    sntp_stop();
+  }
 #endif
 
   WifiPollNtp();
@@ -2304,11 +2309,7 @@ void GpioInit(void)
   }
 
 #ifdef USE_I2C
-  uint32_t max_bus = 1;
-#ifdef USE_I2C_BUS2
-  max_bus = 2;
-#endif  // USE_I2C_BUS2
-  for (uint32_t bus = 0; bus < max_bus; bus++) {
+  for (uint32_t bus = 0; bus < MAX_I2C; bus++) {
     if (PinUsed(GPIO_I2C_SCL, bus) && PinUsed(GPIO_I2C_SDA, bus)) {
       if (I2cBegin(Pin(GPIO_I2C_SDA, bus), Pin(GPIO_I2C_SCL, bus), bus)) {
         TasmotaGlobal.i2c_enabled[bus] = true;
