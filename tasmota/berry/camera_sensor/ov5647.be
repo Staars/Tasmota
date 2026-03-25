@@ -138,26 +138,28 @@ class OV5647 : CSI_Sensor
     # 2. Dynamic PLL multiplier computation
     # OV5647 PLL: pclk = (EXCLK/prediv) * mult / sys_div / pclk_div
     # Both pclk and MIPI lane rate scale linearly with mult.
-    # From calibration: pclk_per_mult = pclk / mult (constant per bin path)
+    # From calibration (RAW10): pclk_per_mult = pclk / mult (constant per bin path)
     #   bin2: 90200000/216 = 417593 Hz/mult   (sys_div=4)
     #   bin1: 84000000/100 = 840000 Hz/mult   (sys_div=2)
-    # MIPI clock per lane (Mbps) vs PLL multiplier:
-    #   bin2: 291 Mbps/lane at mult=216 → ~1.347 Mbps/lane per mult unit
-    #   bin1: 408 Mbps/lane at mult=100 → ~4.08 Mbps/lane per mult unit
+    # Bit-depth correction: RAW8 serializes pixels in 8 MIPI clocks vs 10 for RAW10,
+    # giving 10/8 = 1.25x higher effective pixel clock for the same PLL mult.
+    # pclk_per_mult_actual = pclk_per_mult_raw10 * 10 / bpp
+    # MIPI PHY bit rate depends only on PLL mult, not pixel format.
     # Minimum mult from fps: mult >= HTS * VTS_min * fps / pclk_per_mult
+    var bpp = (fmt == 0) ? 8 : 10
     var vts_min = h + 50
     var pll_mult
     if bin == 2
-      # pclk_per_mult ≈ 417593, use integer: mult = (HTS*vts*fps + 417592) / 417593
-      pll_mult = (1896 * vts_min * fps + 417592) / 417593
-      if pll_mult < 175 pll_mult = 175 end  # floor: matches RAW8 baseline
+      var ppm = 417593 * 10 / bpp  # bit-depth adjusted pclk_per_mult
+      pll_mult = (1896 * vts_min * fps + ppm - 1) / ppm
+      if pll_mult < 175 pll_mult = 175 end  # floor: minimum MIPI bandwidth
       if pll_mult > 252 pll_mult = 252 end
       if pll_mult >= 128 pll_mult = (pll_mult + 1) & 0xFE end  # even only above 127
       self.mipi_clock = (4 * pll_mult + 1) / 3  # ≈ 1.347 * mult
     else
-      # pclk_per_mult = 840000, use integer: mult = (HTS*vts*fps + 839999) / 840000
-      pll_mult = (2500 * vts_min * fps + 839999) / 840000
-      if pll_mult < 80 pll_mult = 80 end   # floor: matches RAW8 baseline
+      var ppm = 840000 * 10 / bpp  # bit-depth adjusted pclk_per_mult
+      pll_mult = (2500 * vts_min * fps + ppm - 1) / ppm
+      if pll_mult < 80 pll_mult = 80 end   # floor: minimum MIPI bandwidth
       if pll_mult > 252 pll_mult = 252 end
       if pll_mult >= 128 pll_mult = (pll_mult + 1) & 0xFE end
       self.mipi_clock = 4 * pll_mult  # ≈ 4.08 * mult
@@ -180,7 +182,8 @@ class OV5647 : CSI_Sensor
        var off_y = 0 + start_y
        
        var hts = 1896
-       var vts = pll_mult * 417593 / (hts * fps)
+       var ppm = 417593 * 10 / bpp
+       var vts = pll_mult * ppm / (hts * fps)
        if vts < h + 50 vts = h + 50 end
 
        return [
@@ -243,7 +246,8 @@ class OV5647 : CSI_Sensor
        
        # Timing
        var hts = 2500
-       var vts = pll_mult * 840000 / (hts * fps)
+       var ppm = 840000 * 10 / bpp
+       var vts = pll_mult * ppm / (hts * fps)
        if vts < h + 50 vts = h + 50 end
 
        return [
@@ -363,8 +367,8 @@ class OV5647 : CSI_Sensor
            req_w=640; req_h=480; req_bin=2; req_fmt=1
         elif res_idx == 1 # 720p (Bin 2)
            req_w=1280; req_h=720; req_bin=2; req_fmt=1
-        elif res_idx == 2 # Full Bin 2 (1296x972)
-           req_w=1296; req_h=972; req_bin=2; req_fmt=1
+        elif res_idx == 2 # Full Bin 2 (1296x972) -> 1296x960 - 972 does not work for unknown reason
+           req_w=1296; req_h=960; req_bin=2; req_fmt=1
         elif res_idx == 3 # 1080p (Bin 1)
            req_w=1920; req_h=1080; req_bin=1; req_fmt=0; req_fps=20
         elif res_idx == 4 # Full Bin 1 (2592x1944)
