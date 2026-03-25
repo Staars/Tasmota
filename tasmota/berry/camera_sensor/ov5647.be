@@ -267,7 +267,7 @@ class OV5647 : CSI_Sensor
          [0x380a, (h >> 8) & 0xFF],     [0x380b, h & 0xFF],     # Output Height
          
          # --- TIMING GENERATOR (HTS/VTS) ---
-         [0x3810, 0x00], [0x3811, 0x05],   # X Offset (ISP)
+         [0x3810, 0x00], [0x3811, 0x04],   # X Offset (ISP)
          [0x3812, 0x00], [0x3813, 0x02],   # Y Offset (ISP)
          [0x380c, (hts >> 8) & 0xFF], [0x380d, hts & 0xFF], # HTS (Total Width)
          [0x380e, (vts >> 8) & 0xFF], [0x380f, vts & 0xFF], # VTS (Total Height -> FPS)
@@ -366,7 +366,7 @@ class OV5647 : CSI_Sensor
         elif res_idx == 2 # Full Bin 2 (1296x972)
            req_w=1296; req_h=972; req_bin=2; req_fmt=1
         elif res_idx == 3 # 1080p (Bin 1)
-           req_w=1920; req_h=1080; req_bin=1; req_fmt=1
+           req_w=1920; req_h=1080; req_bin=1; req_fmt=0; req_fps=20
         elif res_idx == 4 # Full Bin 1 (2592x1944)
            req_w=2592; req_h=1944; req_bin=1; req_fmt=1; req_fps=15
         end

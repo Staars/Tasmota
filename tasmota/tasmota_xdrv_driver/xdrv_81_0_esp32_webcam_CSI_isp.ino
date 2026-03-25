@@ -36,9 +36,6 @@
 #ifdef ESP32
 #ifdef USE_CSI_WEBCAM
 
-#include "esp_idf_version.h"
-#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 5, 0)
-
 #include "driver/isp.h"
 #include "driver/isp_bf.h"
 #include "driver/isp_sharpen.h"
@@ -617,6 +614,5 @@ void WcIspDeinitAWB(void) {
   AddLog(LOG_LEVEL_DEBUG, PSTR("CAM: ISP AWB deinitialized"));
 }
 
-#endif // ESP_IDF_VERSION >= 5.5.0
 #endif // USE_CSI_WEBCAM
 #endif // ESP32

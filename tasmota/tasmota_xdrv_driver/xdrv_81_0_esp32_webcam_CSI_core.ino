@@ -137,7 +137,8 @@ struct {
     SemaphoreHandle_t resume_sem;
     camera_fail_reason_t fail_reason;
     esp_err_t fail_esp_err;
-    uint32_t isp_gamma_y[16];    
+    uint32_t isp_gamma_y[16];
+    uint8_t buffer_count;        // 1 = single buffer (high-res MJPEG fallback), 2 = double buffer
   } core;
   
   // --- 2. JPEG Session (POD) ---
@@ -234,9 +235,7 @@ struct {
   uint32_t compression_ratio_x100; // Compression ratio * 100 (e.g., 1500 = 15.00x)
 } WcStats;
 
-#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 5, 0)
 bool WcIspApplyConfig(isp_proc_handle_t handle, const char* sensor_name, int width, int height);
-#endif
 
 #define BOUNDARY "e8b8c539-047d-4777-a985-fbba6edff11e"
 
@@ -327,15 +326,18 @@ void WcSetFailed(camera_fail_reason_t reason, esp_err_t esp_err = ESP_OK) {
 
 // Callback: Provide new buffer for next frame (Ping-Pong Logic)
 static bool IRAM_ATTR csi_on_get_new_vb(esp_cam_ctlr_handle_t handle, esp_cam_ctlr_trans_t *trans, void *user_data) {
-  if (Wc.core.state != CAM_STREAMING) return false;  // ← ADDED
+  if (Wc.core.state != CAM_STREAMING) return false;
   cb_get_new_count++;
   
-  // Switch to the OTHER buffer for the next write
-  int next_idx = (Wc.core.write_idx + 1) % 2;
-  Wc.core.write_idx = next_idx;
-  
-  // Give hardware the address of the new write buffer
-  trans->buffer = Wc.core.frame_buffer[next_idx];
+  if (Wc.core.buffer_count == 1) {
+    // Single-buffer mode: always reuse buffer[0]
+    trans->buffer = Wc.core.frame_buffer[0];
+  } else {
+    // Double-buffer mode: ping-pong
+    int next_idx = (Wc.core.write_idx + 1) % 2;
+    Wc.core.write_idx = next_idx;
+    trans->buffer = Wc.core.frame_buffer[next_idx];
+  }
   trans->buflen = Wc.core.frame_buffer_size;
   
   return false; 
@@ -369,11 +371,21 @@ static bool IRAM_ATTR csi_on_trans_finished(esp_cam_ctlr_handle_t handle, esp_ca
 uint32_t WcInitPipeline() {
   esp_err_t ret;
 
-  // 1. Allocate Frame Buffers
-  Wc.core.frame_buffer_size = Wc.core.config.width * Wc.core.config.height * 2;
+  // 1. Allocate Frame Buffers (YUV420 = 1.5 bytes/pixel for H.264, YUV422 = 2 bytes/pixel for MJPEG)
+  bool is_h264_session = (Wc.core.session_type == SESSION_RTSP_AND_WS || Wc.core.session_type == SESSION_WEBRTC);
+  Wc.core.frame_buffer_size = is_h264_session
+    ? Wc.core.config.width * Wc.core.config.height * 3 / 2
+    : Wc.core.config.width * Wc.core.config.height * 2;
+  Wc.core.buffer_count = 2;
   for (int i = 0; i < 2; i++) {
     Wc.core.frame_buffer[i] = (uint8_t*)heap_caps_aligned_calloc(128, 1, Wc.core.frame_buffer_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!Wc.core.frame_buffer[i]) {
+      if (i == 1 && Wc.core.session_type == SESSION_MJPEG_HTTP) {
+        // Graceful fallback: single-buffer mode for high-res MJPEG
+        Wc.core.buffer_count = 1;
+        AddLog(LOG_LEVEL_INFO, PSTR("CAM: Single-buffer mode (high-res, %dx%d)"), Wc.core.config.width, Wc.core.config.height);
+        break;
+      }
       AddLog(LOG_LEVEL_ERROR, PSTR("CAM: Frame buffer %d allocation failed"), i);
       WcSetFailed(CAM_FAIL_MEMORY);
       return 0;
@@ -381,7 +393,7 @@ uint32_t WcInitPipeline() {
     esp_cache_msync(Wc.core.frame_buffer[i], Wc.core.frame_buffer_size, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
   }
   Wc.core.write_idx = 0;
-  Wc.core.read_idx = 1;
+  Wc.core.read_idx = (Wc.core.buffer_count == 1) ? 0 : 1;
 
   // 2. Configure CSI
   cam_ctlr_color_t csi_output_format = (Wc.core.session_type == SESSION_RTSP_AND_WS || Wc.core.session_type == SESSION_WEBRTC) ? CAM_CTLR_COLOR_YUV420 : CAM_CTLR_COLOR_YUV422; // H.264 requires YUV420, JPEG needs YUV422 on early P4 chips
@@ -446,16 +458,27 @@ uint32_t WcInitPipeline() {
 
     esp_isp_enable(Wc.core.isp_handle);
 
-#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 5, 0)
     WcIspApplyConfig(Wc.core.isp_handle, Wc.core.config.name, Wc.core.config.width, Wc.core.config.height);
-#endif
   }
 
   // 5. Encoders
   if (Wc.core.session_type == SESSION_MJPEG_HTTP) {
     if (!WcSetupJpegEncoder()) {
-      WcSetFailed(CAM_FAIL_ENCODER_INIT);
-      return 0;
+      // If double-buffered, free buffer[1] to reclaim memory and retry
+      if (Wc.core.buffer_count == 2) {
+        AddLog(LOG_LEVEL_INFO, PSTR("CAM: JPEG alloc failed, falling back to single-buffer mode"));
+        free(Wc.core.frame_buffer[1]);
+        Wc.core.frame_buffer[1] = NULL;
+        Wc.core.buffer_count = 1;
+        Wc.core.read_idx = 0;
+        if (!WcSetupJpegEncoder()) {
+          WcSetFailed(CAM_FAIL_ENCODER_INIT);
+          return 0;
+        }
+      } else {
+        WcSetFailed(CAM_FAIL_ENCODER_INIT);
+        return 0;
+      }
     }
   } else if (Wc.core.session_type == SESSION_RTSP_AND_WS || Wc.core.session_type == SESSION_WEBRTC) {
     if (!WcSetupH264Encoder()) {
@@ -471,9 +494,7 @@ uint32_t WcInitPipeline() {
 // De-initialize only the resolution-dependent hardware
 void WcDeinitPipeline() {
   // 0. AWB must go before ISP processor
-#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 5, 0)
   WcIspDeinitAWB();
-#endif
   
   // 1. Delete Encoder
   if (Wc.h264.handle) {
@@ -488,9 +509,9 @@ void WcDeinitPipeline() {
   }
   if (Wc.jpeg.buffer) { free(Wc.jpeg.buffer); Wc.jpeg.buffer = NULL; }
 
-  // 2. Stop & Delete CSI
+  // 2. Stop & Delete CSI (stop may fail if never started — that's OK)
   if (Wc.core.cam_handle) {
-    esp_cam_ctlr_stop(Wc.core.cam_handle);
+    esp_cam_ctlr_stop(Wc.core.cam_handle);     // harmless ESP_ERR_INVALID_STATE if not started
     esp_cam_ctlr_disable(Wc.core.cam_handle);
     esp_cam_ctlr_del(Wc.core.cam_handle);
     Wc.core.cam_handle = NULL;
@@ -503,8 +524,8 @@ void WcDeinitPipeline() {
     Wc.core.isp_handle = NULL;
   }
 
-  // 4. Free Frame Buffers
-  for (int i = 0; i < 2; i++) {
+  // 4. Free Frame Buffers (only what was allocated)
+  for (int i = 0; i < Wc.core.buffer_count; i++) {
     if (Wc.core.frame_buffer[i]) {
       free(Wc.core.frame_buffer[i]);
       Wc.core.frame_buffer[i] = NULL;
@@ -689,10 +710,11 @@ uint32_t WcStart(void) {
   }
   AddLog(LOG_LEVEL_INFO, PSTR("CAM: Sensor streaming started"));
   
+  // Set state BEFORE delay so ISR callbacks are not rejected
+  Wc.core.state = CAM_STREAMING;
+
   // Give sensor time to start streaming
   delay(100);
-
-  Wc.core.state = CAM_STREAMING;
   
   AddLog(LOG_LEVEL_INFO, PSTR("CAM: Streaming active"));
   return 1;
@@ -895,9 +917,7 @@ bool Xdrv81(uint32_t function) {
       break;
     case FUNC_EVERY_250_MSECOND:
       if (Wc.core.state == CAM_STREAMING) {
-#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 5, 0)
         WcIspAwbProcess();
-#endif
       }
       break;
     case FUNC_EVERY_SECOND:

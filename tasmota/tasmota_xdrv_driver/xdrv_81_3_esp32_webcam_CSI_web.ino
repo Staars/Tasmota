@@ -258,10 +258,12 @@ void CmndWcRes(void) {
       return;
     }
     
+    // Set state BEFORE delay so ISR callbacks are not rejected
+    Wc.core.state = CAM_STREAMING;
+    
     delay(100); // Give sensor time to start
     
     // Resume task
-    Wc.core.state = CAM_STREAMING;
     if (Wc.core.resume_sem) xSemaphoreGive(Wc.core.resume_sem);
     AddLog(LOG_LEVEL_INFO, PSTR("CAM: Resumed streaming"));
   } else {
@@ -394,10 +396,12 @@ void CmndWcWindow(void) {
       return;
     }
     
+    // Set state BEFORE delay so ISR callbacks are not rejected
+    Wc.core.state = CAM_STREAMING;
+    
     delay(100); // Give sensor time to start
     
     // Resume task
-    Wc.core.state = CAM_STREAMING;
     if (Wc.core.resume_sem) xSemaphoreGive(Wc.core.resume_sem);
     AddLog(LOG_LEVEL_INFO, PSTR("CAM: Resumed streaming"));
   } else {
