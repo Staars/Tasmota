@@ -509,19 +509,33 @@ void WcDeinitPipeline() {
   }
   if (Wc.jpeg.buffer) { free(Wc.jpeg.buffer); Wc.jpeg.buffer = NULL; }
 
-  // 2. Stop & Delete CSI (stop may fail if never started — that's OK)
-  if (Wc.core.cam_handle) {
-    esp_cam_ctlr_stop(Wc.core.cam_handle);     // harmless ESP_ERR_INVALID_STATE if not started
-    esp_cam_ctlr_disable(Wc.core.cam_handle);
-    esp_cam_ctlr_del(Wc.core.cam_handle);
-    Wc.core.cam_handle = NULL;
-  }
-
-  // 3. Delete ISP
+  // 2. Delete ISP FIRST (ISP is bound to CSI — must detach before CSI deletion)
   if (Wc.core.isp_handle) {
     esp_isp_disable(Wc.core.isp_handle);
     esp_isp_del_processor(Wc.core.isp_handle);
     Wc.core.isp_handle = NULL;
+  }
+
+  // 3. Stop & Delete CSI
+  // The controller state machine is: new → enable → start → stop → disable → del
+  // Each transition can fail with ESP_ERR_INVALID_STATE if not in expected state.
+  // We must attempt each step but continue regardless, and ALWAYS call del() to
+  // unregister the singleton — otherwise esp_cam_new_csi_ctlr returns NOT_FOUND.
+  if (Wc.core.cam_handle) {
+    esp_err_t r;
+    r = esp_cam_ctlr_stop(Wc.core.cam_handle);
+    if (r != ESP_OK && r != ESP_ERR_INVALID_STATE) {
+      AddLog(LOG_LEVEL_DEBUG, PSTR("CAM: CSI stop ret=0x%x"), r);
+    }
+    r = esp_cam_ctlr_disable(Wc.core.cam_handle);
+    if (r != ESP_OK && r != ESP_ERR_INVALID_STATE) {
+      AddLog(LOG_LEVEL_DEBUG, PSTR("CAM: CSI disable ret=0x%x"), r);
+    }
+    r = esp_cam_ctlr_del(Wc.core.cam_handle);
+    if (r != ESP_OK) {
+      AddLog(LOG_LEVEL_ERROR, PSTR("CAM: CSI del FAILED (0x%x) - singleton may be stuck!"), r);
+    }
+    Wc.core.cam_handle = NULL;
   }
 
   // 4. Free Frame Buffers (only what was allocated)

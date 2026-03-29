@@ -212,13 +212,9 @@ void CmndWcRes(void) {
     }
   }
   
-  // 2. Stop CSI and sensor streaming
-  if (Wc.core.cam_handle) {
-    esp_cam_ctlr_stop(Wc.core.cam_handle);
-  }
+  // 2. Stop sensor streaming and teardown hardware
+  // Note: WcDeinitPipeline handles CSI stop/disable/del — don't call stop() separately
   callBerryEventDispatcher(PSTR("camera"), PSTR("stream"), 0, nullptr, 0);
-  
-  // 3. Teardown hardware
   WcDeinitPipeline();
   
   // 4. Update Config
@@ -343,13 +339,8 @@ void CmndWcWindow(void) {
     }
   }
 
-  // 2. Stop CSI and sensor streaming
-  if (Wc.core.cam_handle) {
-    esp_cam_ctlr_stop(Wc.core.cam_handle);
-  }
+  // 2. Stop sensor streaming and teardown hardware
   callBerryEventDispatcher(PSTR("camera"), PSTR("stream"), 0, nullptr, 0);
-
-  // 3. Teardown hardware
   WcDeinitPipeline();
 
   // 4. Update Config

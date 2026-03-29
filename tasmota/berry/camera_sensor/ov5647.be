@@ -7,7 +7,7 @@ class CSI_Sensor
   var is_initialized
   var width, height
   var mipi_clock
-  var format, bin_mode
+  var format, bin_mode, fps
   
   static REG_END = 0xFFFF
   static REG_DELAY = 0xFFFE
@@ -135,35 +135,35 @@ class OV5647 : CSI_Sensor
     self.format = fmt
     self.bin_mode = bin
 
-    # 2. Dynamic PLL multiplier computation
-    # OV5647 PLL: pclk = (EXCLK/prediv) * mult / sys_div / pclk_div
-    # Both pclk and MIPI lane rate scale linearly with mult.
-    # From calibration (RAW10): pclk_per_mult = pclk / mult (constant per bin path)
-    #   bin2: 90200000/216 = 417593 Hz/mult   (sys_div=4)
-    #   bin1: 84000000/100 = 840000 Hz/mult   (sys_div=2)
-    # Bit-depth correction: RAW8 serializes pixels in 8 MIPI clocks vs 10 for RAW10,
-    # giving 10/8 = 1.25x higher effective pixel clock for the same PLL mult.
-    # pclk_per_mult_actual = pclk_per_mult_raw10 * 10 / bpp
-    # MIPI PHY bit rate depends only on PLL mult, not pixel format.
-    # Minimum mult from fps: mult >= HTS * VTS_min * fps / pclk_per_mult
+    # 2. Dynamic PLL multiplier computation (sys_div=2 for both paths)
+    # OV5647 PLL: pclk = (EXCLK/prediv) * mult / sys_div
+    #   EXCLK=25MHz, prediv=3, sys_div=2 → pclk_per_mult = 25e6/(3*10) = 833333 Hz/mult (RAW10)
+    # Bit-depth correction: RAW8 gives 10/8 = 1.25x higher effective pixel rate
+    # MIPI lane bit rate = 25MHz * mult / 6 Mbps
     var bpp = (fmt == 0) ? 8 : 10
-    var vts_min = h + 50
     var pll_mult
     if bin == 2
-      var ppm = 417593 * 10 / bpp  # bit-depth adjusted pclk_per_mult
-      pll_mult = (1896 * vts_min * fps + ppm - 1) / ppm
-      if pll_mult < 175 pll_mult = 175 end  # floor: minimum MIPI bandwidth
+      if fps > 58 fps = 58 end  # sensor readout throughput limit for full-array bin2
+      var vts_min = 990  # hard minimum for full-array 2x2 binning
+      if vts_min < h + 50 vts_min = h + 50 end
+      var need = vts_min * fps
+      # Overflow-safe: mult = ceil(HTS * vts_min * fps * bpp / (833333 * 10))
+      # Rescaled: 1896*3=5688, 8333330*3≈25000000 → (need * 5688 * (bpp/2)) / 12500000
+      pll_mult = (need * 5688 * (bpp / 2) + 12499999) / 12500000
+      if pll_mult < 70 pll_mult = 70 end   # floor: minimum MIPI bandwidth
       if pll_mult > 252 pll_mult = 252 end
       if pll_mult >= 128 pll_mult = (pll_mult + 1) & 0xFE end  # even only above 127
-      self.mipi_clock = (4 * pll_mult + 1) / 3  # ≈ 1.347 * mult
     else
-      var ppm = 840000 * 10 / bpp  # bit-depth adjusted pclk_per_mult
-      pll_mult = (2500 * vts_min * fps + ppm - 1) / ppm
+      var vts_min = h + 50
+      # Overflow-safe: mult = ceil(HTS * vts_min * fps * bpp / (833333 * 10))
+      # Rescaled: 2500/8333330 ≈ 3/10000
+      pll_mult = (vts_min * fps * 3 * bpp + 9999) / 10000
       if pll_mult < 80 pll_mult = 80 end   # floor: minimum MIPI bandwidth
       if pll_mult > 252 pll_mult = 252 end
       if pll_mult >= 128 pll_mult = (pll_mult + 1) & 0xFE end
-      self.mipi_clock = 4 * pll_mult  # ≈ 4.08 * mult
     end
+    self.mipi_clock = (25 * pll_mult + 5) / 6  # MIPI lane bit rate in Mbps
+    self.fps = fps
 
     print(format("OV5647: CFG %dx%d Bin=%d Fmt=%d FPS=%d PLL=0x%02X(%d) MIPI=%dMbps", w, h, bin, fmt, fps, pll_mult, pll_mult, self.mipi_clock))
 
@@ -182,13 +182,15 @@ class OV5647 : CSI_Sensor
        var off_y = 0 + start_y
        
        var hts = 1896
-       var ppm = 417593 * 10 / bpp
+       var ppm = 833333 * 10 / bpp
        var vts = pll_mult * ppm / (hts * fps)
        if vts < h + 50 vts = h + 50 end
+       var mipi_period = (2400 * (bpp / 2) / 5) / pll_mult
+       if mipi_period < 0x08 mipi_period = 0x08 end
 
        return [
         [0x3034, fmt == 0 ? 0x18 : 0x1a],
-        [0x3035,0x41], 
+        [0x3035,0x21], 
         [0x3036, pll_mult],
         [0x303c,0x11], 
         [0x3106,0xf5],
@@ -219,7 +221,7 @@ class OV5647 : CSI_Sensor
         [0x3a0e,0x03], [0x3a0f,0x58], [0x3a10,0x50], [0x3a1b,0x58], [0x3a1e,0x50], 
         [0x3a11,0x60], [0x3a1f,0x28],
         [0x4001,0x02], [0x4004,0x02], [0x4000,0x09],
-        [0x4837,0x28], [0x4050,0x6e], [0x4051,0x8f], 
+        [0x4837, mipi_period], [0x4050,0x6e], [0x4051,0x8f], 
         [self.REG_END,0x00]
        ]
 
@@ -246,9 +248,11 @@ class OV5647 : CSI_Sensor
        
        # Timing
        var hts = 2500
-       var ppm = 840000 * 10 / bpp
+       var ppm = 833333 * 10 / bpp
        var vts = pll_mult * ppm / (hts * fps)
        if vts < h + 50 vts = h + 50 end
+       var mipi_period = (2400 * (bpp / 2) / 5) / pll_mult
+       if mipi_period < 0x08 mipi_period = 0x08 end
 
        return [
          # --- SYSTEM & PLL ---
@@ -312,7 +316,7 @@ class OV5647 : CSI_Sensor
          # --- STATISTICS ---
          [0x3a11, 0x60], [0x3a1f, 0x28],   # Stats Window?
          [0x4001, 0x02], [0x4004, 0x04], [0x4000, 0x09], # BLC (Black Level)
-         [0x4837, 0x19], [0x4800, 0x34],   # MIPI Control
+         [0x4837, mipi_period], [0x4800, 0x34],   # MIPI Control
          
          [self.REG_END, 0x00]
        ]
@@ -393,7 +397,7 @@ class OV5647 : CSI_Sensor
         b[9] = 2
         b.set(10, self.mipi_clock, 2)
         b[16] = self.bin_mode
-        b[17] = req_fps
+        b[17] = self.fps
         b.setbytes(18, bytes().fromstring("OV5647"))
         b[28] = self.flip(b[27])
       end
