@@ -143,9 +143,7 @@ class OV5647 : CSI_Sensor
     var bpp = (fmt == 0) ? 8 : 10
     var pll_mult
     if bin == 2
-      if fps > 58 fps = 58 end  # sensor readout throughput limit for full-array bin2
-      var vts_min = 990  # hard minimum for full-array 2x2 binning
-      if vts_min < h + 50 vts_min = h + 50 end
+      var vts_min = h + 50
       var need = vts_min * fps
       # Overflow-safe: mult = ceil(HTS * vts_min * fps * bpp / (833333 * 10))
       # Rescaled: 1896*3=5688, 8333330*3≈25000000 → (need * 5688 * (bpp/2)) / 12500000
@@ -170,16 +168,23 @@ class OV5647 : CSI_Sensor
     # 3. Generate Registers
     if bin == 2
        # ==========================================================
-       # BIN 2: HIGH SPEED MODE
+       # BIN 2: HIGH SPEED MODE — Dynamic Windowing
        # ==========================================================
-       # Center crop calculation for Bin 2 (Max 1296x972)
-       var max_w = 1296
-       var max_h = 972
-       var start_x = (max_w - w) / 2 + x
-       var start_y = (max_h - h) / 2 + y
-       # Offsets for ISP/Bayer alignment
-       var off_x = 8 + start_x
-       var off_y = 0 + start_y
+       # Scale to pre-binning (full-sensor) coordinates
+      var max_b_w = 1296
+      var max_b_h = 972
+      var crop_x = (max_b_w - w) / 2 + x
+      var crop_y = (max_b_h - h) / 2 + y
+      var win_x = crop_x * 2          # no +12
+      var win_y = crop_y * 2
+      var end_x = win_x + w*2 + 31    # matches original full end padding
+      var end_y = win_y + h*2 + 15
+      # force alignment
+      win_x = (win_x / 4) * 4
+      win_y = (win_y / 4) * 4
+      
+      if end_x > 2623 end_x = 2623 end
+      if end_y > 1953 end_y = 1953 end
        
        var hts = 1896
        var ppm = 833333 * 10 / bpp
@@ -205,12 +210,14 @@ class OV5647 : CSI_Sensor
         [0x380c,0x07], [0x380d,0x68], # HTS = 1896
         [0x380e, (vts >> 8) & 0xFF],  [0x380f, vts & 0xFF],
         
-        [0x3800,0x00], [0x3801,0x00], [0x3802,0x00], [0x3803,0x00], 
-        [0x3804,0x0a], [0x3805,0x3f], [0x3806,0x07], [0x3807,0xa1], 
+        [0x3800, (win_x >> 8) & 0xFF], [0x3801, win_x & 0xFF],
+        [0x3802, (win_y >> 8) & 0xFF], [0x3803, win_y & 0xFF],
+        [0x3804, (end_x >> 8) & 0xFF], [0x3805, end_x & 0xFF],
+        [0x3806, (end_y >> 8) & 0xFF], [0x3807, end_y & 0xFF],
         [0x3808, (w >> 8) & 0xFF], [0x3809, w & 0xFF],
         [0x380a, (h >> 8) & 0xFF], [0x380b, h & 0xFF],
-        [0x3810, (off_x >> 8) & 0xFF], [0x3811, off_x & 0xFF],
-        [0x3812, (off_y >> 8) & 0xFF], [0x3813, off_y & 0xFF],
+        [0x3810, 0x00], [0x3811, 0x08],
+        [0x3812, 0x00], [0x3813, 0x00],
         
         [0x3630,0x2e], [0x3632,0xe2], [0x3633,0x23], [0x3634,0x44], [0x3636,0x06], 
         [0x3620,0x64], [0x3621,0xe0], [0x3600,0x37],
