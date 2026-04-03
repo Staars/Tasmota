@@ -167,6 +167,29 @@ void WcShowStream(void) {
 
 // Command handlers (mockup/stub implementations)
 
+// Ensure session-specific servers (RTSP/WS/UDP) are running.
+// Idempotent — safe to call if already running.
+void WcEnsureSessionServers(void) {
+  if (Wc.core.session_type == SESSION_RTSP_AND_WS) {
+    if (!Wc.rtsp.server) {
+      Wc.rtsp.server = new WiFiServer(554);
+      Wc.rtsp.server->begin();
+    }
+    if (!Wc.ws.server) {
+      AddLog(LOG_LEVEL_INFO, PSTR("CAM: Starting WS Server on 82"));
+      Wc.ws.server = new WiFiServer(82);
+      Wc.ws.server->begin();
+    }
+    Wc.rtp_udp.begin(5004);
+  } else if (Wc.core.session_type == SESSION_WEBRTC) {
+    if (!Wc.ws.server) {
+      AddLog(LOG_LEVEL_INFO, PSTR("CAM: Starting WS Server on 82"));
+      Wc.ws.server = new WiFiServer(82);
+      Wc.ws.server->begin();
+    }
+  }
+}
+
 void CmndWcRes(void) {
   AddLog(LOG_LEVEL_INFO, PSTR("CAM: WcRes called, payload=%d"), XdrvMailbox.payload);
   
@@ -181,92 +204,80 @@ void CmndWcRes(void) {
     return;
   }
   
-  // Determine current state
   bool was_streaming = (Wc.core.state == CAM_STREAMING);
-  bool was_failed = (Wc.core.state == CAM_FAILED);
   
-  // If failed, clear failure state first
-  if (was_failed) {
-    AddLog(LOG_LEVEL_INFO, PSTR("CAM: Clearing failed state for resolution change"));
-    Wc.core.fail_reason = CAM_FAIL_NONE;
-    Wc.core.fail_esp_err = ESP_OK;
-    Wc.core.state = CAM_IDLE;
-  }
-  
-  // 1. Pause task first if streaming (skip if was failed or idle)
-  if (was_streaming) {
-    AddLog(LOG_LEVEL_INFO, PSTR("CAM: Pausing for resolution change"));
-    Wc.core.state = CAM_PAUSING;
-    
-    if (Wc.core.resume_sem) xSemaphoreGive(Wc.core.resume_sem);
-
-    for (int i = 0; i < 50; i++) {
-      if (Wc.core.state == CAM_PAUSED) break;
-      delay(10);
-    }
-    
-    if (Wc.core.state != CAM_PAUSED) {
-      AddLog(LOG_LEVEL_ERROR, PSTR("CAM: Failed to pause"));
-      ResponseCmndChar_P(PSTR("Pause failed"));
+  // --- Unhealthy: full stop → setup → start cycle ---
+  if (!was_streaming) {
+    AddLog(LOG_LEVEL_INFO, PSTR("CAM: Full cycle for res change (state=%d)"), Wc.core.state);
+    WcStop();  // Handles CAM_FAILED, CAM_IDLE, CAM_INIT — always lands in CAM_IDLE
+    Wc.core.config.res_index = (uint8_t)XdrvMailbox.payload;
+    WcEnsureSessionServers();  // Recreate servers destroyed by WcSetFailed/WcStop
+    if (!WcSetup(false) || !WcStart()) {
+      ResponseCmndFailed();
       return;
     }
+    AddLog(LOG_LEVEL_INFO, PSTR("CAM: Resolution changed to mode %d (%dx%d)"), 
+        XdrvMailbox.payload, Wc.core.config.width, Wc.core.config.height);
+    ResponseCmndNumber(XdrvMailbox.payload);
+    return;
   }
   
-  // 2. Stop sensor streaming and teardown hardware
-  // Note: WcDeinitPipeline handles CSI stop/disable/del — don't call stop() separately
+  // --- Healthy (CAM_STREAMING): pause task, hot-swap pipeline, resume ---
+  AddLog(LOG_LEVEL_INFO, PSTR("CAM: Pausing for resolution change"));
+  Wc.core.state = CAM_PAUSING;
+  if (Wc.core.resume_sem) xSemaphoreGive(Wc.core.resume_sem);
+
+  for (int i = 0; i < 50; i++) {
+    if (Wc.core.state == CAM_PAUSED) break;
+    delay(10);
+  }
+  if (Wc.core.state != CAM_PAUSED) {
+    AddLog(LOG_LEVEL_ERROR, PSTR("CAM: Failed to pause"));
+    ResponseCmndChar_P(PSTR("Pause failed"));
+    return;
+  }
+  
+  // Teardown hardware only (task stays alive, paused on resume_sem)
   callBerryEventDispatcher(PSTR("camera"), PSTR("stream"), 0, nullptr, 0);
   WcDeinitPipeline();
   
-  // 4. Update Config
   Wc.core.config.res_index = (uint8_t)XdrvMailbox.payload;
   
-  // 5. Notify Sensor (Berry)
+  // Re-init sensor and pipeline
   AddLog(LOG_LEVEL_INFO, PSTR("CAM: Reinitializing sensor with mode %d"), XdrvMailbox.payload);
   uint32_t config_addr = (uint32_t)&Wc.core.config;
   int32_t result = callBerryEventDispatcher(PSTR("camera"), PSTR("init"), config_addr, nullptr, 0);
   
-  if (result == 0) {
-    AddLog(LOG_LEVEL_ERROR, PSTR("CAM: Berry init failed"));
+  if (result == 0 || !WcInitPipeline()) {
+    // Hot-swap failed — task is paused with no pipeline. Clean up fully.
+    AddLog(LOG_LEVEL_ERROR, PSTR("CAM: Hot-swap failed, full teardown"));
+    WcSetFailed(result == 0 ? CAM_FAIL_BERRY_INIT : Wc.core.fail_reason);
     ResponseCmndFailed();
     return;
   }
   
-  // 6. Re-Initialize Hardware Pipeline
-  if (!WcInitPipeline()) {
-    AddLog(LOG_LEVEL_ERROR, PSTR("CAM: Pipeline Init Failed"));
+  // Restart CSI and sensor streaming
+  esp_err_t ret = esp_cam_ctlr_start(Wc.core.cam_handle);
+  if (ret != ESP_OK) {
+    AddLog(LOG_LEVEL_ERROR, PSTR("CAM: Failed to restart CSI (0x%x)"), ret);
+    WcSetFailed(CAM_FAIL_CSI_INIT, ret);
     ResponseCmndFailed();
     return;
   }
   
-  // 7. Restart CSI and sensor streaming (if we were streaming before)
-  if (was_streaming) {
-    esp_err_t ret = esp_cam_ctlr_start(Wc.core.cam_handle);
-    if (ret != ESP_OK) {
-      AddLog(LOG_LEVEL_ERROR, PSTR("CAM: Failed to restart CSI (0x%x)"), ret);
-      ResponseCmndFailed();
-      return;
-    }
-    
-    int32_t berry_result = callBerryEventDispatcher(PSTR("camera"), PSTR("stream"), 1, nullptr, 0);
-    if (berry_result == 0) {
-      AddLog(LOG_LEVEL_ERROR, PSTR("CAM: Berry stream_on failed"));
-      ResponseCmndFailed();
-      return;
-    }
-    
-    // Set state BEFORE delay so ISR callbacks are not rejected
-    Wc.core.state = CAM_STREAMING;
-    
-    delay(100); // Give sensor time to start
-    
-    // Resume task
-    if (Wc.core.resume_sem) xSemaphoreGive(Wc.core.resume_sem);
-    AddLog(LOG_LEVEL_INFO, PSTR("CAM: Resumed streaming"));
-  } else {
-    Wc.core.state = CAM_INIT;
+  int32_t berry_result = callBerryEventDispatcher(PSTR("camera"), PSTR("stream"), 1, nullptr, 0);
+  if (berry_result == 0) {
+    AddLog(LOG_LEVEL_ERROR, PSTR("CAM: Berry stream_on failed"));
+    WcSetFailed(CAM_FAIL_BERRY_STREAM);
+    ResponseCmndFailed();
+    return;
   }
   
-  AddLog(LOG_LEVEL_INFO, PSTR("CAM: Resolution changed to mode %d (%dx%d)"), 
+  Wc.core.state = CAM_STREAMING;
+  delay(100);
+  if (Wc.core.resume_sem) xSemaphoreGive(Wc.core.resume_sem);
+  
+  AddLog(LOG_LEVEL_INFO, PSTR("CAM: Resumed streaming at mode %d (%dx%d)"), 
       XdrvMailbox.payload, Wc.core.config.width, Wc.core.config.height);
   ResponseCmndNumber(XdrvMailbox.payload);
 }
@@ -320,84 +331,87 @@ void CmndWcWindow(void) {
 
   bool was_streaming = (Wc.core.state == CAM_STREAMING);
 
-  // 1. Pause task
-  if (was_streaming) {
-    AddLog(LOG_LEVEL_INFO, PSTR("CAM: Pausing for window change"));
-    Wc.core.state = CAM_PAUSING;
-    
-    if (Wc.core.resume_sem) xSemaphoreGive(Wc.core.resume_sem);
+  // Helper: apply window config fields
+  auto apply_window_config = [&]() {
+    Wc.core.config.offset_x = (uint16_t)x;
+    Wc.core.config.offset_y = (uint16_t)y;
+    Wc.core.config.width = (uint16_t)w;
+    Wc.core.config.height = (uint16_t)h;
+    Wc.core.config.binning = (uint8_t)bin;
+    Wc.core.config.fps = (uint8_t)fps;
+    Wc.core.config.format = (uint8_t)format;
+    Wc.core.config.res_index = 255;
+  };
 
-    for (int i = 0; i < 50; i++) {
-      if (Wc.core.state == CAM_PAUSED) break;
-      delay(10);
-    }
-    
-    if (Wc.core.state != CAM_PAUSED) {
-      AddLog(LOG_LEVEL_ERROR, PSTR("CAM: Failed to pause"));
-      Response_P(PSTR("{\"WcWindow\":{\"Error\":\"Pause Failed\"}}"));
+  // --- Unhealthy: full stop → setup → start cycle ---
+  if (!was_streaming) {
+    AddLog(LOG_LEVEL_INFO, PSTR("CAM: Full cycle for window change (state=%d)"), Wc.core.state);
+    WcStop();
+    apply_window_config();
+    WcEnsureSessionServers();  // Recreate servers destroyed by WcSetFailed/WcStop
+    if (!WcSetup(false) || !WcStart()) {
+      Response_P(PSTR("{\"WcWindow\":{\"Error\":\"Setup/Start Failed\"}}"));
       return;
     }
+    Response_P(PSTR("{\"WcWindow\":{\"Status\":\"Applied\",\"Width\":%d,\"Height\":%d,\"Binning\":%d,\"FPS\":%d,\"Format\":%d}}"), 
+      Wc.core.config.width, Wc.core.config.height, Wc.core.config.binning, Wc.core.config.fps, Wc.core.config.format);
+    return;
   }
 
-  // 2. Stop sensor streaming and teardown hardware
+  // --- Healthy (CAM_STREAMING): pause task, hot-swap pipeline, resume ---
+  AddLog(LOG_LEVEL_INFO, PSTR("CAM: Pausing for window change"));
+  Wc.core.state = CAM_PAUSING;
+  if (Wc.core.resume_sem) xSemaphoreGive(Wc.core.resume_sem);
+
+  for (int i = 0; i < 50; i++) {
+    if (Wc.core.state == CAM_PAUSED) break;
+    delay(10);
+  }
+  if (Wc.core.state != CAM_PAUSED) {
+    AddLog(LOG_LEVEL_ERROR, PSTR("CAM: Failed to pause"));
+    Response_P(PSTR("{\"WcWindow\":{\"Error\":\"Pause Failed\"}}"));
+    return;
+  }
+
+  // Teardown hardware only (task stays alive, paused on resume_sem)
   callBerryEventDispatcher(PSTR("camera"), PSTR("stream"), 0, nullptr, 0);
   WcDeinitPipeline();
 
-  // 4. Update Config
-  Wc.core.config.offset_x = (uint16_t)x;
-  Wc.core.config.offset_y = (uint16_t)y;
-  Wc.core.config.width = (uint16_t)w;
-  Wc.core.config.height = (uint16_t)h;
-  Wc.core.config.binning = (uint8_t)bin;
-  Wc.core.config.fps = (uint8_t)fps;
-  Wc.core.config.format = (uint8_t)format;
-  Wc.core.config.res_index = 255;
+  apply_window_config();
 
-  // 5. Notify Sensor
+  // Re-init sensor and pipeline
   AddLog(LOG_LEVEL_INFO, PSTR("CAM: Reinitializing sensor with custom window"));
   uint32_t config_addr = (uint32_t)&Wc.core.config;
   int32_t result = callBerryEventDispatcher(PSTR("camera"), PSTR("init"), config_addr, nullptr, 0);
 
-  if (result == 0) {
-    AddLog(LOG_LEVEL_ERROR, PSTR("CAM: Berry init failed"));
-    Response_P(PSTR("{\"WcWindow\":{\"Error\":\"Sensor Init Failed\"}}"));
-    return;
-  }
-
-  // 6. Re-Initialize Hardware
-  if (!WcInitPipeline()) {
-    AddLog(LOG_LEVEL_ERROR, PSTR("CAM: Pipeline Init Failed"));
+  if (result == 0 || !WcInitPipeline()) {
+    AddLog(LOG_LEVEL_ERROR, PSTR("CAM: Hot-swap failed, full teardown"));
+    WcSetFailed(result == 0 ? CAM_FAIL_BERRY_INIT : Wc.core.fail_reason);
     Response_P(PSTR("{\"WcWindow\":{\"Error\":\"Pipeline Init Failed\"}}"));
     return;
   }
 
-  // 7. Restart CSI and sensor streaming (if we were streaming before)
-  if (was_streaming) {
-    esp_err_t ret = esp_cam_ctlr_start(Wc.core.cam_handle);
-    if (ret != ESP_OK) {
-      AddLog(LOG_LEVEL_ERROR, PSTR("CAM: Failed to restart CSI (0x%x)"), ret);
-      Response_P(PSTR("{\"WcWindow\":{\"Error\":\"CSI Start Failed\"}}"));
-      return;
-    }
-    
-    int32_t berry_result = callBerryEventDispatcher(PSTR("camera"), PSTR("stream"), 1, nullptr, 0);
-    if (berry_result == 0) {
-      AddLog(LOG_LEVEL_ERROR, PSTR("CAM: Berry stream_on failed"));
-      Response_P(PSTR("{\"WcWindow\":{\"Error\":\"Stream Start Failed\"}}"));
-      return;
-    }
-    
-    // Set state BEFORE delay so ISR callbacks are not rejected
-    Wc.core.state = CAM_STREAMING;
-    
-    delay(100); // Give sensor time to start
-    
-    // Resume task
-    if (Wc.core.resume_sem) xSemaphoreGive(Wc.core.resume_sem);
-    AddLog(LOG_LEVEL_INFO, PSTR("CAM: Resumed streaming"));
-  } else {
-    Wc.core.state = CAM_INIT;
+  // Restart CSI and sensor streaming
+  esp_err_t ret = esp_cam_ctlr_start(Wc.core.cam_handle);
+  if (ret != ESP_OK) {
+    AddLog(LOG_LEVEL_ERROR, PSTR("CAM: Failed to restart CSI (0x%x)"), ret);
+    WcSetFailed(CAM_FAIL_CSI_INIT, ret);
+    Response_P(PSTR("{\"WcWindow\":{\"Error\":\"CSI Start Failed\"}}"));
+    return;
   }
+  
+  int32_t berry_result = callBerryEventDispatcher(PSTR("camera"), PSTR("stream"), 1, nullptr, 0);
+  if (berry_result == 0) {
+    AddLog(LOG_LEVEL_ERROR, PSTR("CAM: Berry stream_on failed"));
+    WcSetFailed(CAM_FAIL_BERRY_STREAM);
+    Response_P(PSTR("{\"WcWindow\":{\"Error\":\"Stream Start Failed\"}}"));
+    return;
+  }
+  
+  Wc.core.state = CAM_STREAMING;
+  delay(100);
+  if (Wc.core.resume_sem) xSemaphoreGive(Wc.core.resume_sem);
+  AddLog(LOG_LEVEL_INFO, PSTR("CAM: Resumed streaming"));
 
   Response_P(PSTR("{\"WcWindow\":{\"Status\":\"Applied\",\"Width\":%d,\"Height\":%d,\"Binning\":%d,\"FPS\":%d,\"Format\":%d}}"), 
     Wc.core.config.width, Wc.core.config.height, Wc.core.config.binning, Wc.core.config.fps, Wc.core.config.format);
@@ -561,30 +575,15 @@ void CmndWcSession(void) {
     Wc.rtp.timestamp = random(0, UINT32_MAX);
     Wc.rtp.ssrc = random(0, UINT32_MAX);
     Wc.rtsp.streaming = false;
-    
-    // Start RTSP/WS Servers
-    if (!Wc.rtsp.server) {
-        Wc.rtsp.server = new WiFiServer(554);
-        Wc.rtsp.server->begin();
-    }
-    if (!Wc.ws.server) {
-        AddLog(LOG_LEVEL_INFO, PSTR("CAM: Starting WS Server on 82"));
-        Wc.ws.server = new WiFiServer(82);
-        Wc.ws.server->begin();
-    }
-    Wc.rtp_udp.begin(5004);
   }
   
   // Special Setup for WebRTC (Session 3)
   if (new_type == SESSION_WEBRTC) {
     AddLog(LOG_LEVEL_INFO, PSTR("CAM: WebRTC session selected - audio task will launch after DTLS handshake"));
-    // Start WS Server for WebRTC signaling
-    if (!Wc.ws.server) {
-        AddLog(LOG_LEVEL_INFO, PSTR("CAM: Starting WS Server on 82"));
-        Wc.ws.server = new WiFiServer(82);
-        Wc.ws.server->begin();
-    }
   }
+
+  // Start session-specific servers (RTSP/WS/UDP)
+  WcEnsureSessionServers();
 
   // Auto-Start (unless NONE)
   if (new_type != SESSION_NONE) {
