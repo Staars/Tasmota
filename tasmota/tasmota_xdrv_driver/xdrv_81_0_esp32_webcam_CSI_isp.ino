@@ -31,6 +31,8 @@
  * Graceful degradation:
  * - If isp.json is missing or malformed, ISP runs with bare minimum configuration
  * - Individual section failures are logged but don't stop other sections
+ * 
+ * KNOWN LIMITATION: The ESP32-P4 ISP hardware is limited to a max resolution of 1920x1080.
 \*********************************************************************************************/
 
 #ifdef ESP32

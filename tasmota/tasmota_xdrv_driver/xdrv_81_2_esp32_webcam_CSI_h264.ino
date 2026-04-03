@@ -109,6 +109,29 @@ bool WsPerformWsHandshake(WiFiClient* client) {
 }
 
 // --- H.264 / RTSP Streaming Module ---
+//
+// KNOWN LIMITATIONS:
+//
+// 1. H.264 HW encoder max resolution (from esp_h264_types.h): width<=1920, height<=2032.
+//
+// 2. H.264 HW encoder requires width AND height to be multiples of 16 (macroblock alignment).
+//    1080 is NOT a multiple of 16 (1080/16 = 67.5) — would need alignment to 1088. Frame
+//    buffers and encoder config must use aligned dimensions if 1080p is attempted.
+//
+// 3. At 1920x1080 the HW encoder fails with ESP_H264_ERR_MEM (-3) due to internal RAM
+//    fragmentation. The encoder's DMA reference buffer needs ~138KB contiguous internal RAM
+//    (calculated as 3 * 16 * 24 * mb_width + 7, where mb_width = 120 for 1920px). The
+//    largest free contiguous internal block is typically only ~100-155KB depending on what
+//    else is loaded (WiFi/LWIP buffers, web UI, etc.). The precompiled Arduino framework
+//    has CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP disabled, so WiFi/LWIP buffers consume
+//    internal RAM. Works fine at 1296x960 and below (mb_width=81, ref~93KB).
+//    ESP-IDF H.264 component source: https://github.com/espressif/esp-h264-component
+//
+// 4. WebSocket client pointer race condition: HandleRtsp() runs on the main loop and swaps
+//    Wc.ws.client_ptr (delete old + assign new) without synchronization, while
+//    H264ProcessingTask on Core 1 reads Wc.ws.client_ptr for frame writes. This can cause
+//    a use-after-free crash (Store access fault) when a new WS client connects while H.264
+//    encoding is actively streaming frames. Needs mutex or atomic pointer swap to fix.
 
 void H264ProcessingTask(void *pvParameters) {
   const TickType_t xMaxBlockTime = pdMS_TO_TICKS(100); // 100ms timeout
@@ -350,7 +373,6 @@ void H264ProcessingTask(void *pvParameters) {
 // Encoder Setup Helper Functions
 
 uint32_t WcSetupH264Encoder(void) {
-  // Width must be 16-byte aligned
   const uint16_t width = Wc.core.config.width; //TODO: enforce alignment in config or round up here with warning log
   const uint16_t height = Wc.core.config.height;
 
@@ -634,6 +656,8 @@ void HandleRtsp() {
   }
 
   // --- 2. Port 82 (WebSocket) Handling ---
+  // WARNING: Race condition — this runs on the main loop while H264ProcessingTask on Core 1
+  //   reads Wc.ws.client_ptr without synchronization. See KNOWN LIMITATIONS above.
   if (Wc.ws.server && Wc.ws.server->hasClient()) {
     WiFiClient* new_client = new WiFiClient(Wc.ws.server->available());
     if (new_client && new_client->connected() && WsPerformWsHandshake(new_client)) {

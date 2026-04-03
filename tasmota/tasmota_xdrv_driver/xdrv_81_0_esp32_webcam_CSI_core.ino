@@ -434,6 +434,7 @@ uint32_t WcInitPipeline() {
   }
 
   // 4. ISP — always created here with correct output format for session type
+  // KNOWN LIMITATION: The ESP32-P4 ISP hardware is limited to a maximum resolution of 1920x1080.
   {
     isp_color_t isp_output_format = (Wc.core.session_type == SESSION_RTSP_AND_WS || Wc.core.session_type == SESSION_WEBRTC) ? ISP_COLOR_YUV420 : ISP_COLOR_YUV422;
     color_raw_element_order_t bayer = COLOR_RAW_ELEMENT_ORDER_BGGR;
