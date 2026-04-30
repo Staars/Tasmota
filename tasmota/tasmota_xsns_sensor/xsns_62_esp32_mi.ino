@@ -182,6 +182,7 @@ class MI32ServerCallbacks: public NimBLEServerCallbacks {
         memcpy(item.buffer,connInfo.getAddress().getVal(),6);
         xRingbufferSend(BLERingBufferQueue, (const void*)&item, sizeof(BLERingBufferItem_t) + 6 , pdMS_TO_TICKS(1));
         MI32.infoMsg = MI32_SERV_CLIENT_CONNECTED;
+        pServer->updateConnParams(connInfo.getConnHandle(), 40, 80, 0, 200);
     };
     void onDisconnect(NimBLEServer* pServer, NimBLEConnInfo& connInfo, int reason) {
         struct{

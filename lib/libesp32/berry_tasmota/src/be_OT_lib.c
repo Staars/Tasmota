@@ -1,0 +1,94 @@
+/********************************************************************
+ * Berry module `OT` (OpenThread)
+ * 
+ * To use: `import OT`
+ * 
+ * OpenThread support for Matter over Thread
+ *******************************************************************/
+#include "be_constobj.h"
+#include "be_mapping.h"
+
+#ifdef USE_MATTER_THREAD
+
+extern int be_OT_init(bvm *vm);
+
+extern void be_OT_start(struct bvm *vm);
+BE_FUNC_CTYPE_DECLARE(be_OT_start, "", "@");
+
+extern void be_OT_stop(struct bvm *vm);
+BE_FUNC_CTYPE_DECLARE(be_OT_stop, "", "@");
+
+extern const char* be_OT_get_role(void);
+BE_FUNC_CTYPE_DECLARE(be_OT_get_role, "s", "");
+
+extern void be_OT_set_dataset(struct bvm *vm, uint8_t *buf, size_t size);
+BE_FUNC_CTYPE_DECLARE(be_OT_set_dataset, "", "@(bytes)~");
+
+extern uint8_t* be_OT_get_dataset(int32_t notused, size_t *size);
+BE_FUNC_CTYPE_DECLARE(be_OT_get_dataset, "&", "[i]");
+
+extern const char* be_OT_get_eui64(void);
+BE_FUNC_CTYPE_DECLARE(be_OT_get_eui64, "s", "");
+
+extern int be_OT_get_ipaddr(bvm *vm);
+
+extern void be_OT_state_cb(void *function);
+BE_FUNC_CTYPE_DECLARE(be_OT_state_cb, "", "c");
+
+extern void be_OT_factory_reset(struct bvm *vm);
+BE_FUNC_CTYPE_DECLARE(be_OT_factory_reset, "", "@");
+
+extern int be_OT_srp_host(bvm *vm);
+extern int be_OT_srp_service(bvm *vm);
+extern int be_OT_srp_remove(bvm *vm);
+extern int be_OT_srp_running(bvm *vm);
+extern int be_OT_netdata_services(bvm *vm);
+extern int be_OT_srp_use_unicast(bvm *vm);
+extern int be_OT_set_log_level(bvm *vm);
+extern int be_OT_poll_state(bvm *vm);
+
+extern const char* be_OT_srp_state(void);
+BE_FUNC_CTYPE_DECLARE(be_OT_srp_state, "s", "");
+
+extern const char* be_OT_srp_server(void);
+BE_FUNC_CTYPE_DECLARE(be_OT_srp_server, "s", "");
+
+extern int be_OT_udp_open(bvm *vm);
+extern int be_OT_udp_send(bvm *vm);
+extern int be_OT_udp_poll(bvm *vm);
+
+extern void be_OT_udp_close(struct bvm *vm);
+BE_FUNC_CTYPE_DECLARE(be_OT_udp_close, "", "@");
+
+#include "be_fixed_OT.h"
+
+/* @const_object_info_begin
+module OT (scope: global) {
+  init,           func(be_OT_init)
+  start,          ctype_func(be_OT_start)
+  stop,           ctype_func(be_OT_stop)
+  get_role,       ctype_func(be_OT_get_role)
+  set_dataset,    ctype_func(be_OT_set_dataset)
+  get_dataset,    ctype_func(be_OT_get_dataset)
+  get_eui64,      ctype_func(be_OT_get_eui64)
+  get_ipaddr,     func(be_OT_get_ipaddr)
+  state_cb,       ctype_func(be_OT_state_cb)
+  poll_state,     func(be_OT_poll_state)
+  factory_reset,  ctype_func(be_OT_factory_reset)
+  srp_host,       func(be_OT_srp_host)
+  srp_service,    func(be_OT_srp_service)
+  srp_remove,     func(be_OT_srp_remove)
+  srp_running,    func(be_OT_srp_running)
+  srp_state,      ctype_func(be_OT_srp_state)
+  srp_server,     ctype_func(be_OT_srp_server)
+  netdata_services, func(be_OT_netdata_services)
+  srp_use_unicast, func(be_OT_srp_use_unicast)
+  set_log_level,  func(be_OT_set_log_level)
+  udp_open,       func(be_OT_udp_open)
+  udp_send,       func(be_OT_udp_send)
+  udp_poll,       func(be_OT_udp_poll)
+  udp_close,      ctype_func(be_OT_udp_close)
+}
+@const_object_info_end */
+
+#endif // USE_MATTER_THREAD

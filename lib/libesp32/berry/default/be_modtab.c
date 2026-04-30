@@ -75,6 +75,7 @@ be_extern_native_module(cam);
 // BLE
 be_extern_native_module(MI32);
 be_extern_native_module(BLE);
+be_extern_native_module(OT);
 #ifdef USE_LVGL
 be_extern_native_module(lv);
 be_extern_native_module(lv_extra);
@@ -215,6 +216,9 @@ BERRY_LOCAL const bntvmodule_t* const be_module_table[] = {
 #if defined(USE_MI_ESP32) && !defined(USE_BLE_ESP32)
     &be_native_module(MI32),
     &be_native_module(BLE),
+#if defined(USE_MATTER_THREAD)
+    &be_native_module(OT),
+#endif
 #endif //USE_MI_ESP32
 #ifdef USE_BERRY_CAM
     &be_native_module(cam),
