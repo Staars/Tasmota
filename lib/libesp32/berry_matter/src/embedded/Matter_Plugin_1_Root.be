@@ -604,7 +604,7 @@ class Matter_Plugin_Root : Matter_Plugin
     0x002C: [0,1,2],                  # Time Format Localization Cluster 11.4 p.581
     0x002D: [0],                      # Unit Localization Cluster 11.5 p.583 (Matter 1.3+)
     0x0030: [0,1,2,3,4],              # GeneralCommissioning cluster 11.9 p.627
-    0x0031: [0,1,2,3,4],              # Network Commissioning Cluster cluster 11.8 p.606
+    0x0031: [3,4],                    # Network Commissioning Cluster cluster 11.8 p.606
     0x0032: [],                       # Diagnostic Logs Cluster 11.10 p.637
     0x0033: [0,1,2,8],                # General Diagnostics Cluster 11.11 p.642
     0x0034: [],                       # Software Diagnostics Cluster 11.12 p.654
