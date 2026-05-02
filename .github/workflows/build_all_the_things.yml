@@ -39,13 +39,13 @@ jobs:
           enable-cache: false
       - name: Install dependencies
         run: |
-          uv pip install --system -U https://github.com/pioarduino/platformio-core/archive/refs/tags/v6.1.19.zip
+          uv pip install --system pioarduino
       - name: Run PlatformIO
         env:
           PYTHONIOENCODING: utf-8
           PYTHONUTF8: '1'
         run: platformio run -e ${{ matrix.variant }}
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.variant }}
           path: ./build_output
@@ -71,13 +71,13 @@ jobs:
           enable-cache: false
       - name: Install dependencies
         run: |
-          uv pip install --system -U https://github.com/pioarduino/platformio-core/archive/refs/tags/v6.1.19.zip
+          uv pip install --system pioarduino
       - name: Run PlatformIO
         env:
           PYTHONIOENCODING: utf-8
           PYTHONUTF8: '1'
         run: platformio run -e ${{ matrix.variant }}
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.variant }}
           path: ./build_output
@@ -137,14 +137,14 @@ jobs:
           enable-cache: false
       - name: Install dependencies
         run: |
-          uv pip install --system -U https://github.com/pioarduino/platformio-core/archive/refs/tags/v6.1.19.zip
+          uv pip install --system pioarduino
           cp ./platformio_override_sample.ini ./platformio_override.ini
       - name: Run PlatformIO
         env:
           PYTHONIOENCODING: utf-8
           PYTHONUTF8: '1'
         run: platformio run -e ${{ matrix.variant }}
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.variant }}
           path: ./build_output
@@ -170,13 +170,13 @@ jobs:
           enable-cache: false
       - name: Install dependencies
         run: |
-          uv pip install --system -U https://github.com/pioarduino/platformio-core/archive/refs/tags/v6.1.19.zip
+          uv pip install --system pioarduino
       - name: Run PlatformIO
         env:
           PYTHONIOENCODING: utf-8
           PYTHONUTF8: '1'
         run: platformio run -e ${{ matrix.variant }}-${{ matrix.language }}
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.variant }}-${{ matrix.language }}
           path: ./build_output

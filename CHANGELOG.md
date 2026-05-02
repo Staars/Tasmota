@@ -3,24 +3,64 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased] - Development
 
-## [15.3.0.3]
+## [15.4.0.1]
 ### Added
-- Environment sensor SCD30 second I2C bus support
+- Berry add support for pre-processor (#24679)
+- Berry transpose C defines to Berry in `tasmota_defines_for_berry.be` (#24680)
+- MiElHVAC extend support of AirDirection control (#24675)
+- Command `SetOption [0..2]` to display SetOption values
 
 ### Breaking Changed
 
 ### Changed
+- ESP32 Platform from 2025.04.30 to 2026.04.50, Framework (Arduino Core) from v3.1.11 to v3.3.8 and IDF from v5.3.4.260127 to v5.5.4.260407 (#24676)
+
+### Fixed
+
+### Removed
+
+
+
+## [Released]
+
+## [15.4.0] 20260422
+- Release Sybil
+
+## [15.3.0.4] 20260422
+### Added
+- Berry solidification is now part of the build system (#24664)
+
+### Changed
+- ESP8266 platform update from 2026.03.00 to 2026.04.00 (#24635)
+- ESP32 Platform from 2025.03.30 to 2026.04.30, Framework (Arduino Core) from v3.1.10 to v3.1.11 and IDF from v5.3.4.251226 to v5.3.4.260127 (#24635)
+- ESP32-C5/C6/P4 Platform from 2025.03.50 to 2026.04.50, Framework (Arduino Core) from v3.3.7 to v3.3.8 and IDF from v5.5.3+ to v5.5.4.260407 (#24635)
+- Berry faster compilation (#24656)
+
+### Fixed
+- Mitsubishi Electric HVAC memory leak and other issues for MiElHVAC (#24660)
+- I2S mkv muxing for files (#24666)
+
+## [15.3.0.3] 20260412
+### Added
+- Environment sensor SCD30 second I2C bus support
+- Drivers PCA9685 and PCF8574 multi I2C bus support
+- Shelly Pro EM-50 template {"NAME":"Shelly Pro EM-50","ARCH":"ESP32","GPIO":[0,0,224,0,3457,0,0,0,0,608,544,640,9472,0,5600,0,0,0,0,5568,0,0,0,0,0,0,0,0,5536,0,0,32,4736,0,0,0],"FLAG":0,"BASE":1,"CMND":"AdcGpio36 10000,10000,3350"} (#24604)
+
+### Changed
 - ESP8266 platform update from 2026.02.00 to 2026.03.00 (#24547)
+- ESP8266 use wrapped symbols for sntp_init and sntp_stop (#24566)
 - ESP32 Platform from 2025.02.30 to 2026.03.30, Framework (Arduino Core) from v3.1.9 to v3.1.10 and IDF from v5.3.4.251226 to v5.3.4.260127 (#24547)
 - Matter don't advertize IPv6 global address, only link-local (#24563)
 - ESP32-C5/C6/P4 Platform from 2025.03.30 to 2026.03.50, Framework (Arduino Core) from v3.1.10 to v3.3.7 and IDF from v5.3.4.260127 to v5.5.3+ (#24567)
+- NeoPool always output valid sensitive data (#24573)
+- SML suppress MQTT publish until valid meter data received (#24587)
 
 ### Fixed
 - Athom esp32 2-3-4 gang change led behaviour after firmware update (#24509)
-- ESP8266 heap drain and exception 29 when DHCP provides NTP server (#24515)
-
-### Removed
-- Berry removed `BE_USE_PRECOMPILED_OBJECT` which is enforced in Tasmota (#24565)
+- ESP8266 heap drain and exception 29 when DHCP provides NTP server (#24515, #24566)
+- NeoPool possible IntegerDivideByZero (#24578)
+- Shelly Dimmer 2 serial timeout regression from v15.2.0.1 (#24560)
+- Berry crash when comparing for equality float literals on ESP32 (#24610)
 
 ## [15.3.0.2] 20260315
 ### Added
@@ -65,9 +105,7 @@ All notable changes to this project will be documented in this file.
 ### Removed
 - Berry `tasmota.urlbecload()` superseded by Extension Manager (#24493)
 
-## [Released]
-
-## [15.3.0]
+## [15.3.0] 20260219
 - Release Susan
 
 ## [15.2.0.6] 20260219
@@ -151,7 +189,7 @@ All notable changes to this project will be documented in this file.
 ### Removed
 - Berry `animate` to be replaced with `animation` framework (#24241)
 
-## [15.2.0]
+## [15.2.0] 20251212
 - Release Stephan
 
 ## [15.1.0.3] 20251212

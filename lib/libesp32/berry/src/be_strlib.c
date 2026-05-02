@@ -664,16 +664,22 @@ static const char* get_mode(const char *str, char *buf, size_t buf_len)
     }
     p = skip2dig(p); /* skip width (2 digits at most) */
     if (*p == '.') {
-        p = skip2dig(++p); /* skip width (2 digits at most) */
+        p = skip2dig(++p); /* skip precision (2 digits at most) */
     }
     *(buf++) = '%';
     size_t mode_size = p - str + 1;
     /* Leave 2 bytes for the leading % and the trailing '\0' */
-    if (mode_size > buf_len - 2) { 
-        mode_size = buf_len - 2;
+    /* Also ensure the format specifier character is always included */
+    if (mode_size > buf_len - 2) {
+        /* truncate flags/width but always keep the conversion specifier */
+        size_t max = buf_len - 2;
+        strncpy(buf, str, max - 1);
+        buf[max - 1] = p[0]; /* conversion specifier */
+        buf[max] = '\0';
+    } else {
+        strncpy(buf, str, mode_size);
+        buf[mode_size] = '\0';
     }
-    strncpy(buf, str, mode_size);
-    buf[mode_size] = '\0';
     return p;
 }
 
@@ -1135,6 +1141,26 @@ static int str_endswith(bvm *vm)
     be_return_nil(vm);
 }
 
+#if !BE_USE_PRECOMPILED_OBJECT
+be_native_module_attr_table(string) {
+    be_native_module_function("format", be_str_format),
+    be_native_module_function("count", str_count),
+    be_native_module_function("split", str_split),
+    be_native_module_function("find", str_find),
+    be_native_module_function("hex", str_i2hex),
+    be_native_module_function("byte", str_byte),
+    be_native_module_function("char", str_char),
+    be_native_module_function("tolower", str_tolower),
+    be_native_module_function("toupper", str_toupper),
+    be_native_module_function("tr", str_tr),
+    be_native_module_function("escape", str_escape),
+    be_native_module_function("replace", str_replace),
+    be_native_module_function("startswith", str_startswith),
+    be_native_module_function("endswith", str_endswith),
+};
+
+be_define_native_module(string, NULL);
+#else
 /* @const_object_info_begin
 module string (scope: global, depend: BE_USE_STRING_MODULE) {
     format, func(be_str_format)
@@ -1154,5 +1180,6 @@ module string (scope: global, depend: BE_USE_STRING_MODULE) {
 }
 @const_object_info_end */
 #include "../generate/be_fixed_string.h"
+#endif
 
 #endif /* BE_USE_STRING_MODULE */
