@@ -254,4 +254,6 @@ void otPlatAssertFail(const char *filename, int line)
     esp_system_abort(buf);
 }
 
+};
+
 #endif /* USE_MATTER_THREAD */

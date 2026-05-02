@@ -89,6 +89,14 @@ esp_err_t bt_platform_init(void)
         return ESP_FAIL;
     }
 
+    /* NOTE: We previously raised 802.15.4 PTI to HIGH here to bias
+     * arbitration toward Thread for SRP RX. That regressed PASE: the
+     * 802.15.4 radio sits in RX-on-when-idle mode after init, and with
+     * HIGH PTI it starved the BLE link during commissioning. Default
+     * IDF settings (txrx = LOW, txrx_at = MIDDLE) preserve BLE; phase-
+     * aware tuning (raise PTI only post-attach, lower it again or accept
+     * the trade-off once BLE is gone) is a separate work item. */
+
     ESP_LOGI(BT_LOG_TAG, "Platform initialized");
     return ESP_OK;
 }
