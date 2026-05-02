@@ -172,6 +172,8 @@ struct MI32connectionContextBerry_t{
   NimBLEUUID charUUID;
   uint16_t returnCharUUID;
   uint16_t handle;
+  uint16_t itvl_min;
+  uint16_t itvl_max;
   uint8_t * buffer;
   uint8_t MAC[6];
   uint8_t operation;

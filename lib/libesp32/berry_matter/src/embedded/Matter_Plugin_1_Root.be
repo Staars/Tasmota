@@ -1268,6 +1268,7 @@ class Matter_Plugin_Root : Matter_Plugin
         return true                   # OK
       end
     
+#if USE_MI_EXT_GUI
     elif cluster == 0x0031              # ========== Network Commissioning Cluster  11.9. ==========
 
       if   command == 0x0002          #  ---------- AddOrUpdateWiFiNetwork  ----------
@@ -1291,6 +1292,7 @@ class Matter_Plugin_Root : Matter_Plugin
         ctx.status = nil
         return nil
       end
+#endif
 
     else
       return super(self).invoke_request(session, val, ctx)
