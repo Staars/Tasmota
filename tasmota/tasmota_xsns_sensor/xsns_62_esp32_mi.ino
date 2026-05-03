@@ -182,6 +182,9 @@ class MI32ServerCallbacks: public NimBLEServerCallbacks {
         memcpy(item.buffer,connInfo.getAddress().getVal(),6);
         xRingbufferSend(BLERingBufferQueue, (const void*)&item, sizeof(BLERingBufferItem_t) + 6 , pdMS_TO_TICKS(1));
         MI32.infoMsg = MI32_SERV_CLIENT_CONNECTED;
+        if(MI32.conCtx->itvl_min != 0 && MI32.conCtx->itvl_max != 0){
+          pServer->updateConnParams(connInfo.getConnHandle(), MI32.conCtx->itvl_min >> 1, MI32.conCtx->itvl_max >> 1, 0, 400);
+        }
     };
     void onDisconnect(NimBLEServer* pServer, NimBLEConnInfo& connInfo, int reason) {
         struct{
@@ -776,12 +779,12 @@ extern "C" {
       case 232: // set adv params via bytes() descriptor of size 5,
         #ifndef CONFIG_BT_NIMBLE_EXT_ADV
         if(MI32.conCtx->buffer[0] == 5){
-          uint16_t itvl_min = MI32.conCtx->buffer[2] + (MI32.conCtx->buffer[3] << 8);
-          uint16_t itvl_max = MI32.conCtx->buffer[4] + (MI32.conCtx->buffer[5] << 8);
+          MI32.conCtx->itvl_min = MI32.conCtx->buffer[2] + (MI32.conCtx->buffer[3] << 8);
+          MI32.conCtx->itvl_max = MI32.conCtx->buffer[4] + (MI32.conCtx->buffer[5] << 8);
           pAdvertising->setConnectableMode(MI32.conCtx->buffer[1]);
-          pAdvertising->setMinInterval(itvl_min);
-          pAdvertising->setMaxInterval(itvl_max);
-          AddLog(LOG_LEVEL_DEBUG,PSTR("BLE: adv params: type: %u, min: %u, max: %u"),MI32.conCtx->buffer[1], (uint16_t)(itvl_min * 0.625), (uint16_t)(itvl_max * 0.625)) ;
+          pAdvertising->setMinInterval(MI32.conCtx->itvl_min);
+          pAdvertising->setMaxInterval(MI32.conCtx->itvl_max);
+          AddLog(LOG_LEVEL_DEBUG,PSTR("BLE: adv params: type: %u, min: %u, max: %u"),MI32.conCtx->buffer[1], (uint16_t)(MI32.conCtx->itvl_min * 0.625), (uint16_t)(MI32.conCtx->itvl_max * 0.625)) ;
           success = true;
         }
         #endif //CONFIG_BT_NIMBLE_EXT_ADV
