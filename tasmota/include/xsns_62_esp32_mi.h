@@ -190,7 +190,6 @@ struct {
   // uint32_t period;             // set manually in addition to TELE-period, is set to TELE-period after start
   TaskHandle_t ScanTask = nullptr;
   TaskHandle_t ConnTask = nullptr;
-  TaskHandle_t ServerTask = nullptr;
   MI32connectionContextBerry_t *conCtx = nullptr;
   uint16_t connID;
   union {
@@ -216,13 +215,10 @@ struct {
 
       uint32_t triggerBerryAdvCB:1;
       uint32_t triggerBerryConnCB:1;
-      uint32_t triggerNextConnJob:1;
-      uint32_t readyForNextConnJob:1;
+      uint32_t triggerNextJob:1;
+      uint32_t readyForNextJob:1;
       uint32_t discoverAttributes:1;
 
-      uint32_t triggerNextServerJob:1;
-      uint32_t readyForNextServerJob:1;
-      uint32_t triggerBerryServerCB:1;
       uint32_t deleteServerTask:1;
     };
     uint32_t all = 0;
