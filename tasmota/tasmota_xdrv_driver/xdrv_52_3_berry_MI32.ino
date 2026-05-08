@@ -278,7 +278,7 @@ extern "C" {
 // #else
 //     be_map_insert_nil(vm, "bonds");
 // #endif
-    if(MI32.mode.connected == 1 || MI32.role == 3){
+    if(MI32.mode.connected == 1 || (MI32.role & MI32_ROLE_SERVER)){
       NimBLEClient* _device = nullptr;
       if(MI32.mode.connected == 1){
         _device = NimBLEDevice::getClientByHandle(MI32.connID);

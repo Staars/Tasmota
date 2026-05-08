@@ -219,7 +219,7 @@ struct {
       uint32_t readyForNextJob:1;
       uint32_t discoverAttributes:1;
 
-      uint32_t deleteServerTask:1;
+      uint32_t deleteConnectionTask:1; // request server-task teardown (renamed from deleteServerTask)
     };
     uint32_t all = 0;
   } mode;
@@ -243,11 +243,16 @@ struct {
 
   void *beConnCB;
   void *beAdvCB;
-  void *beServerCB;
   uint8_t *beAdvBuf;
   uint8_t infoMsg = 0;
-  uint8_t role = 0;
+  uint8_t role = 0; // bitfield of MI32_ROLE_* (concurrently active roles)
 } MI32;
+
+// MI32.role bit layout (concurrently-active roles, not mutually exclusive)
+#define MI32_ROLE_SCAN       0x01
+#define MI32_ROLE_CLIENT     0x02
+#define MI32_ROLE_SERVER     0x04
+#define MI32_ROLE_ADVERTISER 0x08
 
 struct mi_sensor_t{
   uint8_t type; //Flora = 1; MI-HT_V1=2; LYWSD02=3; LYWSD03=4; CGG1=5; CGD1=6
@@ -417,8 +422,6 @@ enum MI32_Commands {          // commands useable in console or rules
 
 enum MI32_TASK {
   MI32_TASK_SCAN = 0,
-  MI32_TASK_CONN = 1,
-  MI32_TASK_SERV = 2,
 };
 
 enum BLE_CLIENT_OP {
