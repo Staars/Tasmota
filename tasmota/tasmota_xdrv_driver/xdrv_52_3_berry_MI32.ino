@@ -107,7 +107,7 @@ extern "C" {
   extern void MI32setBerryAdvCB(void* function, uint8_t *buffer);
   extern void MI32setBerryConnCB(void* function, uint8_t *buffer);
   extern void MI32setBerryServerCB(void* function, uint8_t *buffer);
-  extern bool MI32runBerryConnection(uint8_t operation, bbool response, int32_t *arg1);
+  extern bool MI32runBerryConnection(uint8_t operation, bbool response, bbool hasArg1, int32_t arg1);
   extern bool MI32setBerryCtxSvc(const char *Svc, bbool discoverAttributes);
   extern bool MI32setBerryCtxChr(const char *Chr);
   extern bool MI32setBerryCtxMAC(uint8_t *MAC, uint8_t type, uint32_t pin);
@@ -196,22 +196,39 @@ extern "C" {
     be_raisef(vm, "ble_error", "BLE: could not set characteristic");
   }
 
-  void be_BLE_run(struct bvm *vm, uint8_t operation, bbool response, int32_t arg1);
-  void be_BLE_run(struct bvm *vm, uint8_t operation, bbool response, int32_t arg1){
-    int32_t argc = be_top(vm); // Get the number of arguments
-    bool _response = false;
-    if(response){
-      _response = response;
-    }
-    int32_t *ptr_arg1 = nullptr;
-    int32_t _arg1 = arg1;
-    if(argc == 3){
-      ptr_arg1 = &_arg1;
-    }
-    if (MI32runBerryConnection(operation, _response, ptr_arg1)) return;
+int be_BLE_run(bvm *vm);
+int be_BLE_run(bvm *vm) {
+  int argc = be_top(vm);
 
-    be_raisef(vm, "ble_error", "BLE: could not run operation");
+  if (argc < 1 || !be_isint(vm, 1)) {
+    be_raise(vm, "value_error", "BLE.run: wrong arguments");
+    be_return_nil(vm);
   }
+
+  uint8_t operation = (uint8_t) be_toint(vm, 1);
+
+  bool response = false;
+  if (argc >= 2) {
+    response = be_tobool(vm, 2);
+  }
+
+  int32_t arg1 = 0;
+  bool hasArg1 = false;
+  if (argc >= 3) {
+      arg1 = (int32_t) be_toint(vm, 3);
+      hasArg1 = true;
+  }
+
+  AddLog(LOG_LEVEL_DEBUG, PSTR("BLE.run argc=%d op=%u resp=%u hasArg1=%u arg1=%d"),
+        argc, operation, response, hasArg1, arg1);
+
+  if (MI32runBerryConnection(operation, response, hasArg1, arg1)) {
+    be_return_nil(vm);
+  }
+
+  be_raisef(vm, "ble_error", "BLE: could not run operation");
+  be_return_nil(vm);
+}
 
   void be_BLE_adv_watch(struct bvm *vm, uint8_t *buf, size_t size, uint8_t type);
   void be_BLE_adv_watch(struct bvm *vm, uint8_t *buf, size_t size, uint8_t type){

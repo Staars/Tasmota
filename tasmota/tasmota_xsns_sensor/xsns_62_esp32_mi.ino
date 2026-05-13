@@ -81,6 +81,9 @@ void MI32HandleEveryDevice(const NimBLEAdvertisedDevice* advertisedDevice, uint8
 void MI32parseBTHomePacket(char * _buf, uint32_t length, uint8_t addr[6], int RSSI, std::string_view optionalName);
 void MI32ServerSetAdv(NimBLEServer *pServer, std::vector<NimBLEService*>& servicesToStart, bool &shallStartServices);
 void MI32ServerSetCharacteristic(NimBLEServer *pServer, std::vector<NimBLEService*>& servicesToStart, bool &shallStartServices);
+void MI32ConnectionTask(void *pvParameters);
+static void MI32EnsureServerInstance(NimBLEServer *&pServer);
+static void MI32RunClientOp();
 
 std::vector<mi_sensor_t> MIBLEsensors;
 RingbufHandle_t BLERingBufferQueue = nullptr;
@@ -191,6 +194,12 @@ class MI32ServerCallbacks: public NimBLEServerCallbacks {
         item.header.type = BLE_OP_ON_CONNECT;
         memcpy(item.buffer,connInfo.getAddress().getVal(),6);
         xRingbufferSend(BLERingBufferQueue, (const void*)&item, sizeof(BLERingBufferItem_t) + 6 , pdMS_TO_TICKS(1));
+        // Reverse-role client (ACNS-style): peripheral wants to act as GATT client
+        // toward the connected central over the same link. Singleton owned by
+        // NimBLEServer; do NOT delete via NimBLEDevice::deleteClient.
+        if(MI32.conCtx != nullptr){
+          MI32.conCtx->serverPeer = pServer->getClient(connInfo);
+        }
         MI32.infoMsg = MI32_SERV_CLIENT_CONNECTED;
         if(MI32.conCtx->itvl_min != 0 && MI32.conCtx->itvl_max != 0){
           pServer->updateConnParams(connInfo.getConnHandle(), MI32.conCtx->itvl_min >> 1, MI32.conCtx->itvl_max >> 1, 0, 400);
@@ -205,10 +214,10 @@ class MI32ServerCallbacks: public NimBLEServerCallbacks {
         memset(MI32.conCtx->MAC,0,6);
         xRingbufferSend(BLERingBufferQueue, (const void*)&item, sizeof(BLERingBufferItem_t), pdMS_TO_TICKS(1));
         MI32.infoMsg = MI32_SERV_CLIENT_DISCONNECTED;
-        if (MI32Client != nullptr) { // bridge client (only way it exists in server-mode)
-          NimBLEDevice::deleteClient(MI32Client);
-          MI32Client = nullptr;
-          MI32.role &= ~MI32_ROLE_CLIENT;
+        // Reverse-role client cleanup: pServer owns the singleton, just drop our
+        // borrowed pointer. Never call NimBLEDevice::deleteClient on it.
+        if(MI32.conCtx != nullptr){
+          MI32.conCtx->serverPeer = nullptr;
         }
 #ifdef CONFIG_BT_NIMBLE_EXT_ADV
         NimBLEDevice::startAdvertising(0);
@@ -244,6 +253,17 @@ class MI32CharacteristicCallbacks: public NimBLECharacteristicCallbacks {
     };
 
     void onWrite(NimBLECharacteristic* pCharacteristic, NimBLEConnInfo& connInfo) {
+        // TEMP DIAG (disabled, delete when stable): trace GATT writes
+        // size_t _wlen = pCharacteristic->getValue().size();
+        // const uint8_t* _wdata = pCharacteristic->getValue().data();
+        // AddLog(LOG_LEVEL_INFO,PSTR("BLE: TEMP onWrite uuid=%s handle=0x%04x len=%u first=%02X%02X%02X%02X"),
+        //        pCharacteristic->getUUID().toString().c_str(),
+        //        pCharacteristic->getHandle(),
+        //        (unsigned)_wlen,
+        //        _wlen > 0 ? _wdata[0] : 0,
+        //        _wlen > 1 ? _wdata[1] : 0,
+        //        _wlen > 2 ? _wdata[2] : 0,
+        //        _wlen > 3 ? _wdata[3] : 0);
         struct{
           BLERingBufferItem_t header;
           uint8_t buffer[255];
@@ -273,6 +293,11 @@ class MI32CharacteristicCallbacks: public NimBLECharacteristicCallbacks {
     };
 
     void onSubscribe(NimBLECharacteristic* pCharacteristic, NimBLEConnInfo& connInfo, uint16_t subValue) {
+        // TEMP DIAG (disabled, delete when stable): trace CCCD subscribe events
+        // AddLog(LOG_LEVEL_INFO,PSTR("BLE: TEMP onSubscribe uuid=%s handle=0x%04x subValue=0x%04x"),
+        //        pCharacteristic->getUUID().toString().c_str(),
+        //        pCharacteristic->getHandle(),
+        //        subValue);
         struct{
           BLERingBufferItem_t header;
         } item;
@@ -821,98 +846,82 @@ extern "C" {
     MI32.conCtx->buffer = buffer;
   }
 
-  // Idempotent: start the server task on first server op rather than at CB-register time.
-  static void MI32ensureServer(){
-    if((MI32.role & MI32_ROLE_SERVER) && MI32.ConnTask != nullptr) return;
-    // Restore old MI32_TASK_SERV behavior: tear down the scan task before starting the
-    // connection task so the host-side ble_gatts_start() does not race the scan controller.
-    // The cleanup label of MI32ConnectionTask already restarts scan via MI32StartTask(MI32_TASK_SCAN).
-    if (MI32.ScanTask != nullptr && MI32.mode.runningScan == 1) {
-      MI32.mode.deleteScanTask = 1;
-      uint32_t _waitMs = 0;
-      while (MI32.mode.runningScan == 1 && _waitMs < 1000) {
-        vTaskDelay(20/ portTICK_PERIOD_MS);
-        _waitMs += 20;
-      }
+  // Single Berry entry point for both client- and server-side BLE ops.
+  // The unified MI32ConnectionTask is launched once at conn_cb registration;
+  // here we only stage conCtx fields and signal triggerNextJob.
+  bool MI32runBerryConnection(uint8_t operation, bool response, bool hasArg1, int32_t arg1){
+    if(MI32.conCtx == nullptr){
+      return false;
     }
-    MI32StartConnectionTask(3);
-    while (MI32.mode.readyForNextJob != 1){
-       vTaskDelay(100/ portTICK_PERIOD_MS);
-    }
-    AddLog(LOG_LEVEL_DEBUG,PSTR("BLE: server task started and ready!!"));
-  }
+    MI32.conCtx->arg1 = arg1;
+    MI32.conCtx->hasArg1 = hasArg1;
+    MI32.conCtx->response = response;
+    AddLog(LOG_LEVEL_DEBUG,PSTR("BLE: arg1: %u"),MI32.conCtx->arg1);
 
-  bool MI32runBerryServer(uint16_t operation){
-    if(operation > 230){
+    if(operation > 230){ // 231..233: runtime config helpers, executed inline
       return MI32runBerryConfig(operation);
     }
-    MI32ensureServer(); // lazy task start on first server op (SET_ADV/SCAN_RESP/CHARACTERISTIC)
-    MI32.conCtx->operation = operation;
-    AddLog(LOG_LEVEL_DEBUG,PSTR("BLE: Berry server op: %d, response: %u"),MI32.conCtx->operation, MI32.conCtx->response);
-    if(MI32.mode.readyForNextJob == 0){
-      MI32.mode.triggerNextJob = 0;
-      AddLog(LOG_LEVEL_DEBUG,PSTR("M32: old server job not finished yet!!"));
+    if(operation > 200){ // server op (SET_ADV / SCAN_RESP / SET_CHARACTERISTIC)
+      MI32.conCtx->operation = operation;
+      MI32.conCtx->oneOp = false;
+    }
+    else{
+      MI32.conCtx->oneOp = (operation > 9);
+      MI32.conCtx->operation = operation%10;
+      if(MI32.role & MI32_ROLE_SERVER){
+        // accepted-link bridge: never tear down on oneOp completion
+        MI32.conCtx->oneOp = false;
+      }
+    }
+    AddLog(LOG_LEVEL_DEBUG,PSTR("BLE: Berry op: %d, addrType: %d, oneOp: %u, response: %u"),
+           MI32.conCtx->operation, MI32.conCtx->addrType, MI32.conCtx->oneOp, MI32.conCtx->response);
+
+    if(MI32.ConnTask == nullptr){
+      AddLog(LOG_LEVEL_ERROR,PSTR("BLE: connection task not running - register conn_cb first"));
       return false;
+    }
+    if(MI32.mode.readyForNextJob == 0){
+      AddLog(LOG_LEVEL_DEBUG,PSTR("BLE: previous job not finished yet"));
     }
     MI32.mode.triggerNextJob = 1;
     return true;
   }
 
-  bool MI32runBerryConnection(uint8_t operation, bool response, int32_t* arg1){
-    if(MI32.conCtx != nullptr){
-      if(arg1 != nullptr){
-        MI32.conCtx->arg1 = *arg1;
-        MI32.conCtx->hasArg1 = true;
-        AddLog(LOG_LEVEL_DEBUG,PSTR("BLE: arg1: %u"),MI32.conCtx->arg1);
-      }
-      else{
-        MI32.conCtx->hasArg1 = false;
-      }
-      MI32.conCtx->response = response;
-      if(operation > 200){
-        return MI32runBerryServer(operation);
-      }
-      MI32.conCtx->oneOp = (operation > 9);
-      MI32.conCtx->operation = operation%10;
-      AddLog(LOG_LEVEL_DEBUG,PSTR("BLE: Berry connection op: %d, addrType: %d, oneOp: %u, response: %u"),MI32.conCtx->operation, MI32.conCtx->addrType, MI32.conCtx->oneOp, MI32.conCtx->response);
-      if(MI32.role & MI32_ROLE_SERVER){ // accepted-link bridge: route client op into running server task
-        if(MI32.mode.readyForNextJob == 0){
-          AddLog(LOG_LEVEL_DEBUG,PSTR("BLE: bridge: old server job not finished yet!!"));
-        }
-        MI32.conCtx->oneOp = false; // never tear down server when bridge op completes
-        MI32.mode.triggerNextJob = 1;
-        return true;
-      }
-      if(MI32.conCtx->oneOp){
-        MI32StartConnectionTask(2);
-      }
-      else{
-        if(MI32.mode.connected){
-          AddLog(LOG_LEVEL_DEBUG,PSTR("BLE: continue connection job"));
-          MI32.mode.triggerNextJob = 1;
-          if(!MI32.mode.readyForNextJob){
-            AddLog(LOG_LEVEL_DEBUG,PSTR("BLE: old connection job not finished yet!!"));
-          }
-        }
-        else{
-          MI32StartConnectionTask(2); //first job of many or unexpected disconnect
-        }
-      }
-      return true;
-    }
-    return false;
-  }
-
+  // Single launch site for the unified MI32ConnectionTask.
+  // The task survives until conn_cb is cleared (function==nullptr).
   void MI32setBerryConnCB(void* function, uint8_t *buffer){
     if(function == nullptr || buffer == nullptr){
-      MI32.mode.deleteConnectionTask = 1; // request server-task teardown if alive
+      MI32.mode.deleteConnectionTask = 1; // request task teardown if alive
       MI32.beConnCB = nullptr;
       AddLog(LOG_LEVEL_INFO,PSTR("BLE: Connection callback cleared"));
       return;
     }
     MI32ensureConCtx(buffer);
     MI32.beConnCB = function;
-    AddLog(LOG_LEVEL_INFO,PSTR("BLE: Connection Ctx created"));
+    if(MI32.ConnTask != nullptr){
+      // re-registration: keep the running task, just refresh cb/buffer
+      AddLog(LOG_LEVEL_INFO,PSTR("BLE: Connection callback re-registered"));
+      return;
+    }
+    if(BLERingBufferQueue == nullptr){
+      BLERingBufferQueue = xRingbufferCreate(4096, RINGBUF_TYPE_NOSPLIT);
+      if(!BLERingBufferQueue){
+        AddLog(LOG_LEVEL_ERROR,PSTR("BLE: failed to create ringbuffer queue"));
+        return;
+      }
+    }
+    MI32.mode.readyForNextJob   = 0; // task will set to 1 on entry
+    MI32.mode.triggerNextJob    = 0;
+    MI32.mode.deleteConnectionTask = 0;
+    xTaskCreatePinnedToCore(
+      MI32ConnectionTask,    /* Function to implement the task */
+      "MI32ConnectionTask",  /* Name of the task */
+      8192,                  /* Stack size in words */
+      NULL,                  /* Task input parameter */
+      2,                     /* Priority */
+      &MI32.ConnTask,        /* Task handle */
+      0);                    /* Core */
+    AddLog(LOG_LEVEL_INFO,PSTR("BLE: Connection task started"));
   }
 
   // Server callback collapsed onto beConnCB. Berry demuxes by op-code (103, 221..230, 1..7).
@@ -1281,44 +1290,6 @@ void MI32ScanTask(void *pvParameters){
 
 // connection task section
 
-bool MI32ConnectActiveSensor(){ // only use inside a task !!
-  if(MI32.conCtx->operation == 5) {
-    return false;
-  }
-  NimBLEAddress _address = NimBLEAddress(MI32.conCtx->MAC, MI32.conCtx->addrType);
-  if(MI32Client != nullptr){
-    if(MI32Client->isConnected() && MI32.mode.connected == 1){ //we only accept a "clean" state without obvious packet losses
-      if(MI32.conCtx->operation == 5){ //5 is the disconnect operation
-        NimBLEDevice::deleteClient(MI32Client); // disconnect the old
-        return false; // request disconnect
-      }
-      if(MI32Client->getPeerAddress() == _address){
-        MI32.infoMsg = MI32_STILL_CONNECTED;
-        return true; // still connected -> keep it
-      }
-      else{
-        // AddLog(LOG_LEVEL_ERROR,PSTR("M32: disconnect %s"),MI32Client->getPeerAddress().toString().c_str());
-        NimBLEDevice::deleteClient(MI32Client); // disconnect the old and connect the new
-      }
-    }
-  }
-
-  MI32Client = nullptr;
-  if(NimBLEDevice::getCreatedClientCount() > 0) {
-    MI32Client = NimBLEDevice::getClientByPeerAddress(_address);
-  }
-  if (!MI32Client){
-    MI32Client = NimBLEDevice::createClient(_address);
-    MI32Client->setClientCallbacks(&MI32SensorCB , false);
-  }
-  if (!MI32Client->connect(false)) {
-      NimBLEDevice::deleteClient(MI32Client);
-      // AddLog(LOG_LEVEL_ERROR,PSTR("M32: did not connect client"));
-      return false;
-  }
-  return true;
-}
-
 /**
  * @brief Retrieves all services of the connected BLE device and stores the result into the transfer buffer of Berry's BLE module
  *        buffer format:
@@ -1379,76 +1350,149 @@ void MI32ConnectionGetCharacteristics(NimBLERemoteService* pSvc){
 }
 
 /**
- * @brief Accepted-link bridge: perform one client GATT op against the peer that is currently
- *        connected to our server. Reuses the live ACL link via NimBLEDevice::createClient(addr)
- *        + connect(false). Called only from the role==3 server task dispatch.
- *        Sets MI32.conCtx->error on failure. Mirrors the body of the client branch of
- *        MI32ConnectionTask; deliberately duplicated rather than refactored.
+ * @brief Lazy server bring-up. Runs INSIDE MI32ConnectionTask on the first server op.
+ *        Tears down the scan task to avoid a race with ble_gatts_start(), then creates
+ *        the singleton NimBLEServer and sets MI32_ROLE_SERVER.
  */
-void MI32BridgeRunClientOp(){
-  if (MI32.conCtx == nullptr) return;
+static void MI32EnsureServerInstance(NimBLEServer *&pServer){
+  if(pServer != nullptr) return;
+  if(MI32.ScanTask != nullptr && MI32.mode.runningScan == 1){
+    MI32.mode.deleteScanTask = 1;
+    uint32_t _waitMs = 0;
+    while(MI32.mode.runningScan == 1 && _waitMs < 1000){
+      vTaskDelay(20 / portTICK_PERIOD_MS);
+      _waitMs += 20;
+    }
+  }
+  pServer = NimBLEDevice::createServer();
+  pServer->setCallbacks(new MI32ServerCallbacks(), true);
+  MI32.role |= MI32_ROLE_SERVER;
+  AddLog(LOG_LEVEL_DEBUG,PSTR("BLE: server instance created (lazy)"));
+}
+
+/**
+ * @brief Single client GATT op handler. Replaces both MI32BridgeRunClientOp and the
+ *        legacy in-task client switch. Behaviour differs in two minor ways depending
+ *        on whether MI32_ROLE_SERVER is set ("bridge") or not ("legacy"):
+ *          - legacy: stops scan, sets willConnect, polls mode.connected (≤1s)
+ *          - bridge: server callback owns the link; just reuse/createClient(addr) +
+ *            connect(false) without the mode.connected handshake.
+ *        Sets MI32_ROLE_CLIENT on successful (re)use of MI32Client; clears it on op==5.
+ */
+static void MI32RunClientOp(){
+  if(MI32.conCtx == nullptr) return;
+  const bool bridge = (MI32.role & MI32_ROLE_SERVER) != 0;
+  // Reverse-role borrowed singleton (bridge with an accepted central). When set,
+  // we ride the existing accepted link instead of creating an outbound client.
+  // Lifetime owned by NimBLEServer; never deleted here.
+  NimBLEClient * const acceptedCentralClient = bridge ? MI32.conCtx->serverPeer : nullptr;
   NimBLEAddress _address = NimBLEAddress(MI32.conCtx->MAC, MI32.conCtx->addrType);
 
-  if (MI32.conCtx->operation == 5) { // disconnect bridge client only, leave server link intact
-    if (MI32Client != nullptr) {
+  // op==5: tear everything down. In bridge-active mode this also drops the
+  // central link via the server-owned client; the actual freeing of serverPeer
+  // happens in MI32ServerCallbacks::onDisconnect (we never free the singleton).
+  if(MI32.conCtx->operation == 5){
+    if(acceptedCentralClient != nullptr && acceptedCentralClient->isConnected()){
+      acceptedCentralClient->disconnect();
+    }
+    if(MI32Client != nullptr){
+      if(MI32Client->isConnected()){
+        MI32Client->disconnect();
+      }
       NimBLEDevice::deleteClient(MI32Client);
       MI32Client = nullptr;
     }
+    MI32.mode.connected = 0;
     MI32.role &= ~MI32_ROLE_CLIENT;
     return;
   }
 
-  if (MI32Client == nullptr) {
-    if (NimBLEDevice::getCreatedClientCount() > 0) {
-      MI32Client = NimBLEDevice::getClientByPeerAddress(_address);
-    }
-    if (MI32Client == nullptr) {
-      MI32Client = NimBLEDevice::createClient(_address);
-      MI32Client->setClientCallbacks(&MI32SensorCB, false);
-    }
-  }
-  if (!MI32Client->isConnected()) {
-    if (!MI32Client->connect(false)) {
+  // Pick the working client: bridge-active uses the accepted central link
+  // (already connected, server owns lifecycle); otherwise use/allocate the
+  // outbound MI32Client.
+  NimBLEClient * activeClient = acceptedCentralClient;
+  if(acceptedCentralClient == nullptr){
+    // (re)acquire outbound client
+    if(MI32Client != nullptr && !MI32Client->isConnected()){
       NimBLEDevice::deleteClient(MI32Client);
       MI32Client = nullptr;
-      MI32.conCtx->error = MI32_CONN_NO_CONNECT;
-      return;
     }
+    if(MI32Client == nullptr){
+      if(NimBLEDevice::getCreatedClientCount() > 0){
+        MI32Client = NimBLEDevice::getClientByPeerAddress(_address);
+      }
+      if(MI32Client == nullptr){
+        MI32Client = NimBLEDevice::createClient(_address);
+        MI32Client->setClientCallbacks(&MI32SensorCB, false);
+      }
+    }
+    if(!MI32Client->isConnected()){
+      if(!bridge){
+        if(MI32Scan) MI32Scan->stop();
+        MI32suspendScanTask();
+        MI32.mode.willConnect = 1;
+      }
+      if(!MI32Client->connect(false)){
+        NimBLEDevice::deleteClient(MI32Client);
+        MI32Client = nullptr;
+        MI32.mode.willConnect = 0;
+        MI32.conCtx->error = MI32_CONN_NO_CONNECT;
+        return;
+      }
+      if(!bridge){
+        uint32_t timer = 0;
+        while(MI32.mode.connected == 0){
+          if(timer > 100){ // 100 * 10ms = 1s
+            MI32Client->disconnect();
+            NimBLEDevice::deleteClient(MI32Client);
+            MI32Client = nullptr;
+            MI32.mode.willConnect = 0;
+            MI32.conCtx->error = MI32_CONN_NO_CONNECT;
+            return;
+          }
+          timer++;
+          vTaskDelay(10 / portTICK_PERIOD_MS);
+        }
+      }
+    }
+    activeClient = MI32Client;
+    MI32.role |= MI32_ROLE_CLIENT; // tracks outbound MI32Client only
   }
-  MI32.role |= MI32_ROLE_CLIENT;
 
-  if (MI32.mode.discoverAttributes || MI32.conCtx->hasArg1) {
-    MI32Client->discoverAttributes();
+  if(MI32.mode.discoverAttributes || MI32.conCtx->hasArg1){
+    activeClient->discoverAttributes();
+  }
+
+  if(MI32.conCtx->operation == 6){ // get remote services
+    MI32ConnectionGetServices();
+    return;
   }
 
   NimBLERemoteService* pSvc = nullptr;
   NimBLERemoteCharacteristic* pChr = nullptr;
   std::vector<NimBLERemoteCharacteristic*> charvector;
 
-  if (MI32.conCtx->operation == 6) { // get remote services
-    MI32ConnectionGetServices();
-    return;
-  }
-  if (MI32.conCtx->hasArg1) {
+  if(MI32.conCtx->hasArg1){
     pSvc = nullptr;
   } else {
-    pSvc = MI32Client->getService(MI32.conCtx->serviceUUID);
+    pSvc = activeClient->getService(MI32.conCtx->serviceUUID);
   }
-  if (pSvc) {
-    if (MI32.conCtx->operation == 7) { // get remote characteristics
+  if(pSvc){
+    if(MI32.conCtx->operation == 7){ // get remote characteristics
       MI32ConnectionGetCharacteristics(pSvc);
       return;
     }
     pChr = pSvc->getCharacteristic(MI32.conCtx->charUUID);
-  } else if (MI32.conCtx->hasArg1) {
-    pChr = MI32Client->getCharacteristic(MI32.conCtx->arg1);
+  } else if(MI32.conCtx->hasArg1){
+    pChr = activeClient->getCharacteristic(MI32.conCtx->arg1); // by handle
   } else {
     MI32.conCtx->error = MI32_CONN_NO_SERVICE;
   }
-  if (pChr) {
-    switch (MI32.conCtx->operation) {
+
+  if(pChr){
+    switch(MI32.conCtx->operation){
       case 1: // read
-        if (pChr->canRead()) {
+        if(pChr->canRead()){
           NimBLEAttValue _val = pChr->readValue();
           MI32.conCtx->buffer[0] = _val.size();
           memcpy(MI32.conCtx->buffer + 1, _val.data(), MI32.conCtx->buffer[0]);
@@ -1458,9 +1502,10 @@ void MI32BridgeRunClientOp(){
         }
         break;
       case 2: // write
-        if (pChr->canWrite() || pChr->canWriteNoResponse()) {
+        if(pChr->canWrite() || pChr->canWriteNoResponse()){
           uint8_t len = MI32.conCtx->buffer[0];
-          if (pChr->writeValue(MI32.conCtx->buffer + 1, len, MI32.conCtx->response & !pChr->canWriteNoResponse())) {
+          if(pChr->writeValue(MI32.conCtx->buffer + 1, len,
+                              MI32.conCtx->response & !pChr->canWriteNoResponse())){
             MI32.conCtx->handle = pChr->getHandle();
           } else {
             MI32.conCtx->error = MI32_CONN_DID_NOT_WRITE;
@@ -1468,25 +1513,26 @@ void MI32BridgeRunClientOp(){
         } else {
           MI32.conCtx->error = MI32_CONN_CAN_NOT_WRITE;
         }
+        MI32.mode.readingDone = 1;
         break;
       case 3: // subscribe
-        if (!BLERingBufferQueue) {
+        if(!BLERingBufferQueue){
           MI32.conCtx->error = MI32_CONN_CAN_NOT_NOTIFY;
           break;
         }
-        if (MI32.conCtx->hasArg1) {
-          if (pChr->canNotify()) {
-            if (!pChr->subscribe(true, MI32notifyCB, MI32.conCtx->response)) {
+        if(MI32.conCtx->hasArg1){
+          if(pChr->canNotify()){
+            if(!pChr->subscribe(true, MI32notifyCB, MI32.conCtx->response)){
               MI32.conCtx->error = MI32_CONN_CAN_NOT_NOTIFY;
             }
           }
         } else {
           charvector = pSvc->getCharacteristics(true);
           uint32_t position = 1;
-          for (auto &it: charvector) {
-            if (it->getUUID() == MI32.conCtx->charUUID) {
-              if (it->canNotify()) {
-                if (!it->subscribe(true, MI32notifyCB, MI32.conCtx->response)) {
+          for(auto &it: charvector){
+            if(it->getUUID() == MI32.conCtx->charUUID){
+              if(it->canNotify()){
+                if(!it->subscribe(true, MI32notifyCB, MI32.conCtx->response)){
                   MI32.conCtx->error = MI32_CONN_CAN_NOT_NOTIFY;
                 } else {
                   MI32.conCtx->buffer[position++] = it->getHandle() >> 8;
@@ -1502,282 +1548,110 @@ void MI32BridgeRunClientOp(){
       default:
         break;
     }
-  } else if (MI32.conCtx->operation < 5) {
+  } else if(MI32.conCtx->operation < 5){
     MI32.conCtx->error = MI32_CONN_NO_CHARACTERISTIC;
   }
-}
 
-bool MI32StartConnectionTask(uint8_t role){
-    MI32.mode.readyForNextJob = 0;
-    if (role == 3) { // server
-      AddLog(LOG_LEVEL_DEBUG,PSTR("BLE: Server task ... start"));
-      if (BLERingBufferQueue == nullptr){
-        BLERingBufferQueue = xRingbufferCreate(4096, RINGBUF_TYPE_NOSPLIT);
-        if(!BLERingBufferQueue) {
-          AddLog(LOG_LEVEL_ERROR,PSTR("BLE: failed to create ringbuffer queue"));
-          return false;
-        }
-      }
-    } else { // client
-      if(MI32.conCtx == nullptr) return false;
-      if(MI32.conCtx->buffer == nullptr) return false;
-      MI32.mode.willConnect = 1;
-      MI32Scan->stop();
-      MI32suspendScanTask();
-    }
-    MI32.role |= (role == 3) ? MI32_ROLE_SERVER : MI32_ROLE_CLIENT;
-    xTaskCreatePinnedToCore(
-      MI32ConnectionTask,    /* Function to implement the task */
-      "MI32ConnectionTask",  /* Name of the task */
-      (role == 3) ? 8192 : 4096, /* Stack size in words */
-      NULL,             /* Task input parameter */
-      2,                /* Priority of the task */
-      &MI32.ConnTask,   /* Task handle. */
-      0);               /* Core where the task should run */
-    return true;
-}
-
-void MI32ConnectionTask(void *pvParameters){
-  NimBLEServer *pServer = nullptr;
-  const bool isServer = (MI32.role & MI32_ROLE_SERVER) != 0; // captured at task entry
-  if (isServer) { // server mode (formerly MI32ServerTask)
-    MI32.conCtx->error = MI32_CONN_NO_ERROR;
-    pServer = NimBLEDevice::createServer();
-    auto _srvCB = new MI32ServerCallbacks();
-    pServer->setCallbacks(_srvCB,true);
-
-    MI32.mode.readyForNextJob = 1;
-    MI32.mode.deleteConnectionTask = 0;
-    std::vector<NimBLEService*> servicesToStart;
-    bool shallStartServices = true; //will start service at the first call MI32ServerSetAdv()
-
-    for(;;){
-      while(MI32.mode.triggerNextJob == 0){
-        if(MI32.mode.deleteConnectionTask == 1){
-          goto cleanup;
-        }
-        vTaskDelay(50/ portTICK_PERIOD_MS);
-      }
-      MI32.mode.readyForNextJob = 0;
-      switch(MI32.conCtx->operation){
-        case BLE_OP_SET_ADV: case BLE_OP_SET_SCAN_RESP:
-          MI32ServerSetAdv(pServer, servicesToStart, shallStartServices);
-          break;
-        case BLE_OP_SET_CHARACTERISTIC:
-          MI32ServerSetCharacteristic(pServer, servicesToStart, shallStartServices);
-          break;
-        case 1: case 2: case 3: case 5: case 6: case 7: // accepted-link bridge: client op against connected peer
-          MI32.conCtx->error = MI32_CONN_NO_ERROR;
-          MI32BridgeRunClientOp();
-          MI32.mode.triggerBerryConnCB = 1;
-          break;
-      }
-
-      MI32.mode.triggerNextJob = 0;
-      MI32.mode.readyForNextJob = 1;
-    }
-    return; // unreachable
-  }
-
-#if !defined(CONFIG_IDF_TARGET_ESP32C3) || !defined(CONFIG_IDF_TARGET_ESP32C5) || !defined(CONFIG_IDF_TARGET_ESP32C6) //needs more testing ...
-    // NimBLEDevice::setOwnAddrType(BLE_OWN_ADDR_RANDOM,false); //seems to be important for i.e. xbox controller, hopefully not breaking other things
-#endif //CONFIG_IDF_TARGET_ESP32C3
-    MI32.conCtx->error = MI32_CONN_NO_ERROR;
-    if (MI32ConnectActiveSensor()){
-      if (BLERingBufferQueue == nullptr){
-        BLERingBufferQueue = xRingbufferCreate(2048, RINGBUF_TYPE_NOSPLIT);
-      }
-      MI32.mode.readingDone = 0;
+  // legacy oneOp: optionally wait for notification then disconnect
+  if(MI32.conCtx->oneOp && !bridge){
+    if(MI32.conCtx->error == MI32_CONN_NO_ERROR){
       uint32_t timer = 0;
-      while (MI32.mode.connected == 0){
-        if (timer>1000){
-          MI32Client->disconnect();
-          NimBLEDevice::deleteClient(MI32Client);
-          MI32.mode.willConnect = 0;
-          MI32.conCtx->error = MI32_CONN_NO_CONNECT; // not connected
-          vTaskDelay(100/ portTICK_PERIOD_MS);
-          goto cleanup;
+      while(timer < 150){
+        if(MI32.mode.readingDone) break;
+        if(timer > 148 && MI32.conCtx->operation == 3){
+          MI32.conCtx->error = MI32_CONN_NOTIFY_TIMEOUT;
         }
         timer++;
-        vTaskDelay(10/ portTICK_PERIOD_MS);
+        vTaskDelay(100 / portTICK_PERIOD_MS);
       }
-      if(MI32.mode.discoverAttributes || MI32.conCtx->hasArg1){ // explicit or in the first run with selection by handle
-        MI32Client->discoverAttributes(); // solves connection problems on i.e. yeelight dimmer
+    }
+    MI32.mode.readingDone = 0;
+    if(MI32Client != nullptr && MI32Client->isConnected()){
+      MI32Client->disconnect();
+    }
+    MI32.role &= ~MI32_ROLE_CLIENT; // defensive; onDisconnect also clears it
+  } else {
+    MI32.mode.readingDone = 0;
+  }
+}
+
+/**
+ * @brief Unified BLE worker task. Launched once from MI32setBerryConnCB and survives
+ *        until conn_cb is cleared (function==nullptr -> deleteConnectionTask=1).
+ *        Handles both client (BLE_OP 1..7) and server (BLE_OP_SET_*) ops in the same
+ *        loop. MI32.role is set lazily by op dispatch:
+ *          - server bits flip in MI32EnsureServerInstance on first SET_ADV/CHARACTERISTIC
+ *          - client bits flip in MI32RunClientOp on successful connect, cleared on op==5
+ */
+void MI32ConnectionTask(void *pvParameters){
+  NimBLEServer *pServer = nullptr;
+  std::vector<NimBLEService*> servicesToStart;
+  bool shallStartServices = true;
+
+  MI32.mode.readyForNextJob = 1;
+  MI32.mode.deleteConnectionTask = 0;
+  if(MI32.conCtx) MI32.conCtx->error = MI32_CONN_NO_ERROR;
+
+  for(;;){
+    while(MI32.mode.triggerNextJob == 0){
+      if(MI32.mode.deleteConnectionTask == 1){
+        goto cleanup;
       }
-      NimBLERemoteService* pSvc = nullptr;
-      NimBLERemoteCharacteristic* pChr = nullptr;
-      std::vector<NimBLERemoteCharacteristic*>charvector;
+      vTaskDelay(50 / portTICK_PERIOD_MS);
+    }
+    MI32.mode.triggerNextJob  = 0;
+    MI32.mode.readyForNextJob = 0;
+    MI32.conCtx->error = MI32_CONN_NO_ERROR;
 
-      // AddLog(LOG_LEVEL_INFO,PSTR("M32: start connection loop"));
-      bool keepConnectionAlive = true;
-      MI32.mode.triggerNextJob = 1;
-      while(keepConnectionAlive){
-        while(MI32.mode.triggerNextJob == 0){
-          vTaskDelay(50/ portTICK_PERIOD_MS);
-          if(MI32.mode.connected == 0){
-              goto cleanup;
-          }
-          // AddLog(LOG_LEVEL_INFO,PSTR("M32: wait ..."));
-        }
-
-        MI32.mode.triggerNextJob = 0;
-        MI32.mode.readyForNextJob = 0;
-        if(MI32.conCtx->operation == 5){
-          MI32Client->disconnect();
-          break;
-        }
-
-        if(MI32.conCtx->operation == 6){ // get remote services to Berry
-          MI32ConnectionGetServices();
-        }
-        else{
-          if(MI32.conCtx->hasArg1){
-            pSvc = nullptr; // invalidate possible dangling service from last operation
-          }
-          else{
-            pSvc = MI32Client->getService(MI32.conCtx->serviceUUID);
-          }
-        }
-
-        if(pSvc) {
-          if(MI32.conCtx->operation == 7){ // get remote characteristics to Berry
-            MI32ConnectionGetCharacteristics(pSvc);
-          }
-          else{
-          pChr = pSvc->getCharacteristic(MI32.conCtx->charUUID);
-          }
-        }
-        else if(MI32.conCtx->hasArg1){
-          pChr = MI32Client->getCharacteristic(MI32.conCtx->arg1); // get by handle, overriding svc and chr values
-        }
-        else{
-          if(MI32.conCtx->operation != 6){
-            MI32.conCtx->error = MI32_CONN_NO_SERVICE;
-          }
-        }
-        if (pChr){
-          switch(MI32.conCtx->operation){
-            case 1:
-              if(pChr->canRead()) {
-                NimBLEAttValue _val = pChr->readValue();
-                MI32.conCtx->buffer[0] = _val.size();
-                memcpy( MI32.conCtx->buffer + 1,_val.data(),MI32.conCtx->buffer[0]);
-                MI32.conCtx->handle = pChr->getHandle();
-              }
-              else{
-                MI32.conCtx->error = MI32_CONN_CAN_NOT_READ;
-              }
-              break;
-            case 2:
-              if(pChr->canWrite() || pChr->canWriteNoResponse()) {
-                uint8_t len = MI32.conCtx->buffer[0];
-                if(pChr->writeValue(MI32.conCtx->buffer + 1,len,MI32.conCtx->response & !pChr->canWriteNoResponse())) { // falls always back to "no response" if server provides both options
-                  // AddLog(LOG_LEVEL_DEBUG,PSTR("M32: write op done"));
-                  MI32.conCtx->handle = pChr->getHandle();
-                }
-                else{
-                MI32.conCtx->error = MI32_CONN_DID_NOT_WRITE;
-                }
-              }
-              else{
-                MI32.conCtx->error = MI32_CONN_CAN_NOT_WRITE;
-              }
-              MI32.mode.readingDone = 1;
-              break;
-            case 3:
-              if(!BLERingBufferQueue) {
-                MI32.conCtx->error = MI32_CONN_CAN_NOT_NOTIFY;
-                break;
-              }
-              if(MI32.conCtx->hasArg1){ // characteristic selected by handle
-                if (pChr->canNotify()) {
-                  if(!pChr->subscribe(true, MI32notifyCB, MI32.conCtx->response)) {
-                    MI32.conCtx->error = MI32_CONN_CAN_NOT_NOTIFY; // will return the last result only ATM, maybe check differently
-                  }
-                }
-              }
-              else { //  characteristic selected by UUID
-                charvector = pSvc->getCharacteristics(true); // always try to subscribe to all characteristics with the same UUID
-                uint32_t position = 1;
-                for (auto &it: charvector) {
-                  if (it->getUUID() == MI32.conCtx->charUUID) {
-                    if (it->canNotify()) {
-                      if(!it->subscribe(true, MI32notifyCB, MI32.conCtx->response)) {
-                        MI32.conCtx->error = MI32_CONN_CAN_NOT_NOTIFY; // will return the last result only ATM, maybe check differently
-                      }
-                      else{
-                        MI32.conCtx->buffer[position++] = it->getHandle() >> 8;
-                        MI32.conCtx->buffer[position++] = it->getHandle() & 0xff;
-                        MI32.conCtx->handle = it->getHandle();
-                      }
-                    }
-                  }
-                }
-                MI32.conCtx->buffer[0] = position - 1;
-              }
-              break;
-          default:
-              break;
-          }
-        }
-        else{
-            if(MI32.conCtx->operation < 5){ // no characteristics are fine for ops, that are not read, write or subscribe
-              MI32.conCtx->error = MI32_CONN_NO_CHARACTERISTIC;
-            }
-        }
-        timer = 0;
-
-        if(MI32.conCtx->error == MI32_CONN_NO_ERROR){
-          while (timer<150){
-            if (MI32.mode.readingDone || !MI32.conCtx->oneOp){
-              break;
-            }
-            else if (timer>148){
-              if (MI32.conCtx->operation==3 && MI32.conCtx->oneOp) {
-                MI32.conCtx->error = MI32_CONN_NOTIFY_TIMEOUT; //did not read on notify - timeout only for one-shot op
-              }
-            }
-            timer++;
-            vTaskDelay(100/ portTICK_PERIOD_MS);
-          }
-        }
-      MI32.mode.readingDone = 0;
-      if(MI32.conCtx->oneOp){
-        MI32Client->disconnect();
-        keepConnectionAlive = false;
-      }
-      else{
-        MI32.mode.readyForNextJob = 1;
+    switch(MI32.conCtx->operation){
+      case BLE_OP_SET_ADV:
+      case BLE_OP_SET_SCAN_RESP:
+        MI32EnsureServerInstance(pServer);
+        MI32ServerSetAdv(pServer, servicesToStart, shallStartServices);
+        break;
+      case BLE_OP_SET_CHARACTERISTIC:
+        MI32EnsureServerInstance(pServer);
+        MI32ServerSetCharacteristic(pServer, servicesToStart, shallStartServices);
+        break;
+      case 1: case 2: case 3: case 5: case 6: case 7: // client op
+        MI32RunClientOp();
         MI32.mode.triggerBerryConnCB = 1;
-      }
+        break;
+      default:
+        AddLog(LOG_LEVEL_DEBUG,PSTR("BLE: unhandled op %u"), MI32.conCtx->operation);
+        break;
     }
+
+    MI32.mode.readyForNextJob = 1;
   }
-  else{
-    MI32.mode.willConnect = 0;
-    MI32.conCtx->error = MI32_CONN_NO_CONNECT; // could not connect (including op:5 in not connected state)
-  }
+
 cleanup:
-  if (isServer) {
-    if (MI32Client != nullptr) { // bridge client (only way it exists in server cleanup)
-      NimBLEDevice::deleteClient(MI32Client);
-      MI32Client = nullptr;
+  if(pServer != nullptr){
+    pServer->stopAdvertising();
+  }
+  if(MI32Client != nullptr){
+    if(MI32Client->isConnected()){
+      MI32Client->disconnect();
     }
-    if (pServer) pServer->stopAdvertising();
+    NimBLEDevice::deleteClient(MI32Client);
+    MI32Client = nullptr;
+  }
+  if(MI32.conCtx != nullptr){
     delete MI32.conCtx;
     MI32.conCtx = nullptr;
-    MI32.role &= ~(MI32_ROLE_SERVER | MI32_ROLE_CLIENT | MI32_ROLE_ADVERTISER);
-  } else {
-    MI32.mode.connected = 0;
-    MI32.mode.triggerBerryConnCB = 1;
-    MI32.role &= ~MI32_ROLE_CLIENT;
   }
-  if (BLERingBufferQueue != nullptr){
+  if(BLERingBufferQueue != nullptr){
     vRingbufferDelete(BLERingBufferQueue);
     BLERingBufferQueue = nullptr;
   }
-  MI32.ConnTask = nullptr; // ensure MI32ensureServer() respawns on next server op instead of skipping on a stale handle
+  MI32.role &= ~(MI32_ROLE_SERVER | MI32_ROLE_CLIENT | MI32_ROLE_ADVERTISER);
+  MI32.mode.connected            = 0;
+  MI32.mode.willConnect          = 0;
+  MI32.mode.deleteConnectionTask = 0;
+  MI32.mode.triggerBerryConnCB   = 1;
+  MI32.ConnTask = nullptr;
   MI32StartTask(MI32_TASK_SCAN);
-  vTaskDelete( NULL );
+  vTaskDelete(NULL);
 }
 
 // server task section
@@ -1805,7 +1679,8 @@ void MI32ServerSetAdv(NimBLEServer *pServer, std::vector<NimBLEService*>& servic
     //TODO
 #else
     pAdvertising->setConnectableMode(MI32.conCtx->arg1);
-    // AddLog(LOG_LEVEL_DEBUG,PSTR("BLE: AdvertisementType: %u"),MI32.conCtx->arg1);
+    // TEMP DIAG (disabled, delete when stable): bool _scmRc = pAdvertising->setConnectableMode(MI32.conCtx->arg1);
+    // AddLog(LOG_LEVEL_INFO,PSTR("BLE: TEMP setConnectableMode(%u) rc=%u"),MI32.conCtx->arg1,_scmRc);
 #endif
     // AddLog(LOG_LEVEL_DEBUG,PSTR("BLE: AdvertisementType: %u"),MI32.conCtx->arg1);
   }
@@ -1817,10 +1692,18 @@ void MI32ServerSetAdv(NimBLEServer *pServer, std::vector<NimBLEService*>& servic
   if(shallStartServices && MI32.conCtx->operation == BLE_OP_SET_ADV){
     for (auto & pService : servicesToStart) {
         pService->start();
+        // TEMP DIAG (disabled, delete when stable):
+        // bool _svcRc = pService->start();
+        // AddLog(LOG_LEVEL_INFO,PSTR("BLE: TEMP pService->start() uuid=%s rc=%u"),
+        //        pService->getUUID().toString().c_str(),_svcRc);
+        // vTaskDelay(50 / portTICK_PERIOD_MS); // settle between service starts
     }
     shallStartServices = false; // only do this at the first run
     if(servicesToStart.size() != 0){
+      // TEMP DIAG (disabled, delete when stable): vTaskDelay(100 / portTICK_PERIOD_MS); // settle before pServer->start()
       pServer->start();         // only start server when svc and chr do exist
+      // TEMP DIAG (disabled, delete when stable): AddLog(LOG_LEVEL_INFO,PSTR("BLE: TEMP pServer->start() done"));
+      // TEMP DIAG (disabled, delete when stable): vTaskDelay(100 / portTICK_PERIOD_MS); // settle after pServer->start()
       uint32_t idx = 0;
       for (auto & pService : servicesToStart) {
         std::vector<NimBLECharacteristic *> characteristics = pService->getCharacteristics();
@@ -1828,6 +1711,18 @@ void MI32ServerSetAdv(NimBLEServer *pServer, std::vector<NimBLEService*>& servic
         for (auto & pCharacteristic : characteristics) {
           uint16_t handle = pCharacteristic->getHandle(); // now we have handles, so pass them to Berry
           AddLog(LOG_LEVEL_DEBUG,PSTR("BLE: caracteristic started %s"),pCharacteristic->toString().c_str());
+          // TEMP DIAG (disabled, delete when stable): probe whether host auto-created a CCCD
+          // uint16_t _cccdHandle = 0;
+          // ble_uuid16_t _cccdUuid = { { BLE_UUID_TYPE_16 }, 0x2902 };
+          // int _findRc = ble_gatts_find_dsc(pService->getUUID().getBase(),
+          //                                  pCharacteristic->getUUID().getBase(),
+          //                                  (const ble_uuid_t*)&_cccdUuid,
+          //                                  &_cccdHandle);
+          // AddLog(LOG_LEVEL_INFO,PSTR("BLE: TEMP find CCCD chr=%s props=0x%04X rc=%d cccd=0x%04x"),
+          //        pCharacteristic->getUUID().toString().c_str(),
+          //        pCharacteristic->getProperties(),
+          //        _findRc,
+          //        _cccdHandle);
           item.buffer[idx] = (uint8_t)handle>>8;
           item.buffer[idx+1] = (uint8_t)handle&0xff;
           if (idx > 254) break; // limit to 127 characteristics
@@ -1847,6 +1742,10 @@ void MI32ServerSetAdv(NimBLEServer *pServer, std::vector<NimBLEService*>& servic
     if(pAdvertising->isAdvertising() == false && !shallStartServices){ // first advertisement
       vTaskDelay(1000/ portTICK_PERIOD_MS);   // work around to prevent crash on start
       pAdvertising->start(0);
+      // TEMP DIAG (disabled, delete when stable):
+      // bool _advStartRc = pAdvertising->start(0);
+      // AddLog(LOG_LEVEL_INFO,PSTR("BLE: TEMP pAdvertising->start(0) rc=%u"),_advStartRc);
+      // ble_gatts_show_local(); // NIMBLE_LOG_LEVEL=NONE may suppress output
     }
   } else
   {
@@ -1857,13 +1756,23 @@ void MI32ServerSetAdv(NimBLEServer *pServer, std::vector<NimBLEService*>& servic
   adv.addData((const uint8_t*)&MI32.conCtx->buffer[1], MI32.conCtx->buffer[0]);
   if(MI32.conCtx->operation == BLE_OP_SET_ADV){
     pAdvertising->setAdvertisementData(adv); // replace whole advertisement with our custom data from the Berry side
+    // TEMP DIAG (disabled, delete when stable):
+    // bool _sadRc = pAdvertising->setAdvertisementData(adv);
+    // AddLog(LOG_LEVEL_INFO,PSTR("BLE: TEMP setAdvertisementData rc=%u"),_sadRc);
     if(pAdvertising->isAdvertising() == false && !shallStartServices){ // first advertisement
       vTaskDelay(1000/ portTICK_PERIOD_MS);   // work around to prevent crash on start
       pAdvertising->start();
+      // TEMP DIAG (disabled, delete when stable):
+      // bool _advStartRc = pAdvertising->start();
+      // AddLog(LOG_LEVEL_INFO,PSTR("BLE: TEMP pAdvertising->start() rc=%u"),_advStartRc);
+      // ble_gatts_show_local(); // NIMBLE_LOG_LEVEL=NONE may suppress output
     }
   } else
   {
     pAdvertising->setScanResponseData(adv);
+    // TEMP DIAG (disabled, delete when stable):
+    // bool _ssrRc = pAdvertising->setScanResponseData(adv);
+    // AddLog(LOG_LEVEL_INFO,PSTR("BLE: TEMP setScanResponseData rc=%u"),_ssrRc);
     pAdvertising->enableScanResponse(true);
   }
 #endif //CONFIG_BT_NIMBLE_EXT_ADV
@@ -1905,19 +1814,28 @@ void MI32ServerSetCharacteristic(NimBLEServer *pServer, std::vector<NimBLEServic
                          NIMBLE_PROPERTY::INDICATE; // default to "all"
     if(MI32.conCtx->hasArg1){
       _property = MI32.conCtx->arg1;    // override with optional argument
-      // AddLog(LOG_LEVEL_DEBUG,PSTR("BLE: _property: %u"),_property);
     }
+    AddLog(LOG_LEVEL_INFO,PSTR("BLE: createCharacteristic %s _property=0x%02X shallStartServices=%u"),
+           MI32.conCtx->charUUID.toString().c_str(), _property, shallStartServices);
     pCharacteristic = pService->createCharacteristic(MI32.conCtx->charUUID,
-                                                    _property);  //... or create characteristic.
+                                                     _property);  //... or create characteristic.
     if(pCharacteristic == nullptr){
       MI32.conCtx->error = MI32_CONN_NO_CHARACTERISTIC;
       return;
     }
     pCharacteristic->setCallbacks(&MI32ChrCallback);
     MI32.infoMsg = MI32_SERV_CHARACTERISTIC_ADDED;
+    // TEMP DIAG (disabled, delete when stable): vTaskDelay(50 / portTICK_PERIOD_MS); // settle after createCharacteristic
   }
   pCharacteristic->setValue(MI32.conCtx->buffer + 1, MI32.conCtx->buffer[0]); // set value
   MI32.conCtx->response ? pCharacteristic->indicate() : pCharacteristic->notify(); // use response to select indicate vs notification
+  // TEMP DIAG (disabled, delete when stable):
+  // bool _indNotRc = MI32.conCtx->response ? pCharacteristic->indicate() : pCharacteristic->notify();
+  // AddLog(LOG_LEVEL_INFO,PSTR("BLE: TEMP %s() chr=%s handle=0x%04x rc=%u"),
+  //        MI32.conCtx->response ? "indicate" : "notify",
+  //        pCharacteristic->getUUID().toString().c_str(),
+  //        pCharacteristic->getHandle(),
+  //        _indNotRc);
   struct{
     BLERingBufferItem_t header;
   } item;

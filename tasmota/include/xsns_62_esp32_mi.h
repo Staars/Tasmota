@@ -175,6 +175,11 @@ struct MI32connectionContextBerry_t{
   uint16_t itvl_min;
   uint16_t itvl_max;
   uint8_t * buffer;
+  // Reverse-role client (peripheral side). Singleton owned by NimBLEServer
+  // (do NOT pass to NimBLEDevice::deleteClient). Use only for server-side
+  // ACNS-style queries toward the connected central. Set in
+  // MI32ServerCallbacks::onConnect, cleared (not freed) in onDisconnect.
+  NimBLEClient * serverPeer = nullptr;
   uint8_t MAC[6];
   uint8_t operation;
   uint8_t addrType;
