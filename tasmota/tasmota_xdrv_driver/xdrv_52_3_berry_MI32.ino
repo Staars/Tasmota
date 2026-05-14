@@ -219,9 +219,6 @@ int be_BLE_run(bvm *vm) {
       hasArg1 = true;
   }
 
-  AddLog(LOG_LEVEL_DEBUG, PSTR("BLE.run argc=%d op=%u resp=%u hasArg1=%u arg1=%d"),
-        argc, operation, response, hasArg1, arg1);
-
   if (MI32runBerryConnection(operation, response, hasArg1, arg1)) {
     be_return_nil(vm);
   }

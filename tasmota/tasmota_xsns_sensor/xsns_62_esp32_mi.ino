@@ -311,6 +311,9 @@ class MI32CharacteristicCallbacks: public NimBLECharacteristicCallbacks {
 
 
 void MI32notifyCB(NimBLERemoteCharacteristic* pRemoteCharacteristic, uint8_t* pData, size_t length, bool isNotify){
+  AddLog(LOG_LEVEL_DEBUG,PSTR("M32: notifyCB uuid=%04x handle=%u len=%u isNotify=%u"),
+    *reinterpret_cast<const uint16_t*>(pRemoteCharacteristic->getUUID().getValue() + 12),
+    pRemoteCharacteristic->getHandle(), (unsigned)length, (unsigned)isNotify);
   if(isNotify){
     struct{
       BLERingBufferItem_t header;
@@ -1459,7 +1462,19 @@ static void MI32RunClientOp(){
     MI32.role |= MI32_ROLE_CLIENT; // tracks outbound MI32Client only
   }
 
-  if(MI32.mode.discoverAttributes || MI32.conCtx->hasArg1){
+  // Full rediscovery is destructive: NimBLEClient::discoverAttributes() calls
+  // deleteServices() first, which invalidates every cached NimBLERemoteService
+  // and NimBLERemoteCharacteristic - including the m_notifyCallback that
+  // pChr->subscribe(...) registered on the previous instance. The CCCD on the
+  // peer stays enabled, so notifications keep arriving, but NimBLE's notify
+  // dispatch finds the new (un-callback'd) characteristic instance and silently
+  // drops them. Concretely on ANCS this kills DS notifications after NS subscribe
+  // re-runs discovery. Only rediscover when the cache is genuinely empty (first
+  // op on this client, or right after a hasArg1 handle-based op explicitly asked
+  // for it).
+  if(MI32.conCtx->hasArg1){
+    activeClient->discoverAttributes();
+  } else if(MI32.mode.discoverAttributes && activeClient->getServices(false).empty()){
     activeClient->discoverAttributes();
   }
 
@@ -1527,7 +1542,18 @@ static void MI32RunClientOp(){
             }
           }
         } else {
-          charvector = pSvc->getCharacteristics(true);
+          // Use cached characteristics (refresh=false). Passing true here calls
+          // NimBLERemoteService::retrieveCharacteristics() which wipes m_vChars
+          // and destroys every NimBLERemoteCharacteristic in this service,
+          // including any m_notifyCallback that an earlier subscribe(...) on
+          // the same service registered. The peer-side CCCD stays enabled, so
+          // notifications keep arriving from the peer, but NimBLE's notify
+          // dispatch finds the new (un-callback'd) characteristic instance and
+          // silently drops them. Concretely on ANCS: subscribing NS after DS
+          // would wipe DS's callback, killing DS notifications. The cache is
+          // already populated by the pSvc->getCharacteristic(...) call above
+          // (which lazily discovers on first access), so false is safe.
+          charvector = pSvc->getCharacteristics(false);
           uint32_t position = 1;
           for(auto &it: charvector){
             if(it->getUUID() == MI32.conCtx->charUUID){
@@ -2369,8 +2395,18 @@ void MI32BLELoop()
     MI32.mode.triggerBerryConnCB = 0;
   }
 
-  // server callback
-  if(MI32.mode.connected == 0 && BLERingBufferQueue != nullptr){
+  // server callback (bridge mode: connected==0 because the outbound MI32Client
+  // is not in use). Drain the ring buffer through the same deferred path as the
+  // client branch above: stage into conCtx, raise triggerBerryConnCB, and let
+  // the unified dispatch block fire on the next loop tick. This serializes
+  // bridge notifications (op==103) with worker-task op completions and prevents
+  // conCtx from being overwritten mid-dispatch.
+  // triggerNextJob==0 guard: Berry's previous callback may have synchronously
+  // staged a new op into conCtx; we must NOT clobber it before ConnectionTask
+  // consumes it (that consumption clears triggerNextJob).
+  if(MI32.mode.connected == 0 && BLERingBufferQueue != nullptr
+     && MI32.mode.triggerBerryConnCB == 0 && MI32.mode.readyForNextJob == 1
+     && MI32.mode.triggerNextJob == 0){
     size_t size;
     BLERingBufferItem_t *q = (BLERingBufferItem_t *)xRingbufferReceive(BLERingBufferQueue, &size, pdMS_TO_TICKS(1));
 
@@ -2384,13 +2420,7 @@ void MI32BLELoop()
       MI32.conCtx->operation = q->type;
       MI32.conCtx->error = 0;
       vRingbufferReturnItem(BLERingBufferQueue, (void *)q);
-      if(MI32.beConnCB != nullptr){
-        void (*func_ptr)(int, int, int, int) = (void (*)(int, int, int, int))MI32.beConnCB;
-        char _message[32];
-        GetTextIndexed(_message, sizeof(_message), MI32.conCtx->error, kMI32_ConnErrorMsg);
-        AddLog(LOG_LEVEL_DEBUG_MORE,PSTR("M32: BryCbMsg: %s"),_message);
-        func_ptr(MI32.conCtx->error, MI32.conCtx->operation , MI32.conCtx->returnCharUUID, MI32.conCtx->handle);
-      }
+      MI32.mode.triggerBerryConnCB = 1;
     }
   }
   if(MI32.infoMsg > 0){
