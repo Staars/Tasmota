@@ -194,14 +194,19 @@ class MI32ServerCallbacks: public NimBLEServerCallbacks {
         item.header.type = BLE_OP_ON_CONNECT;
         memcpy(item.buffer,connInfo.getAddress().getVal(),6);
         xRingbufferSend(BLERingBufferQueue, (const void*)&item, sizeof(BLERingBufferItem_t) + 6 , pdMS_TO_TICKS(1));
+        MI32.infoMsg = MI32_SERV_CLIENT_CONNECTED;
+        // All conCtx-> derefs below need a single null guard. conCtx is normally
+        // alive for the entire bridge lifetime, but tearing the bridge down
+        // before the central disconnects is a plausible future op.
+        if(MI32.conCtx == nullptr) return;
         // Reverse-role client (ACNS-style): peripheral wants to act as GATT client
         // toward the connected central over the same link. Singleton owned by
         // NimBLEServer; do NOT delete via NimBLEDevice::deleteClient.
-        if(MI32.conCtx != nullptr){
-          MI32.conCtx->serverPeer = pServer->getClient(connInfo);
-        }
-        MI32.infoMsg = MI32_SERV_CLIENT_CONNECTED;
+        MI32.conCtx->serverPeer = pServer->getClient(connInfo);
         if(MI32.conCtx->itvl_min != 0 && MI32.conCtx->itvl_max != 0){
+          // Note: occasional CP-write spikes (~1+s vs ~200ms typical) are iOS-side
+          // ATT scheduling within the negotiated connection interval, not a bridge
+          // bug. Tighter intervals reduce worst case but cost iOS battery.
           pServer->updateConnParams(connInfo.getConnHandle(), MI32.conCtx->itvl_min >> 1, MI32.conCtx->itvl_max >> 1, 0, 400);
         }
     };
@@ -211,14 +216,13 @@ class MI32ServerCallbacks: public NimBLEServerCallbacks {
         } item;
         item.header.length = 0;
         item.header.type = BLE_OP_ON_DISCONNECT;
-        memset(MI32.conCtx->MAC,0,6);
         xRingbufferSend(BLERingBufferQueue, (const void*)&item, sizeof(BLERingBufferItem_t), pdMS_TO_TICKS(1));
         MI32.infoMsg = MI32_SERV_CLIENT_DISCONNECTED;
+        if(MI32.conCtx == nullptr) return;
+        memset(MI32.conCtx->MAC,0,6);
         // Reverse-role client cleanup: pServer owns the singleton, just drop our
         // borrowed pointer. Never call NimBLEDevice::deleteClient on it.
-        if(MI32.conCtx != nullptr){
-          MI32.conCtx->serverPeer = nullptr;
-        }
+        MI32.conCtx->serverPeer = nullptr;
 #ifdef CONFIG_BT_NIMBLE_EXT_ADV
         NimBLEDevice::startAdvertising(0);
 #else
@@ -226,16 +230,33 @@ class MI32ServerCallbacks: public NimBLEServerCallbacks {
 #endif
     };
     void onAuthenticationComplete(NimBLEConnInfo& connInfo) {
+      // Persist both records: peripheral-side reconnect needs OUR_SEC (host
+      // queries it on LL_LTK_REQ); PEER_SEC carries peer IRK/CSRK. Layout
+      // sent to Berry: [our_sec][peer_sec] back-to-back.
+      constexpr size_t security_record_size = sizeof(ble_store_value_sec);
       struct{
         BLERingBufferItem_t header;
-        uint8_t buffer[sizeof(ble_store_value_sec)];
+        uint8_t buffer[2 * security_record_size];
       } item;
-      item.header.length = sizeof(ble_store_value_sec);
+      ble_store_value_sec our_security_record;
+      ble_store_value_sec peer_security_record;
+      memset(&our_security_record, 0, security_record_size);
+      memset(&peer_security_record, 0, security_record_size);
+      ble_gap_conn_desc connection_desc;
+      if (ble_gap_conn_find(connInfo.getConnHandle(), &connection_desc) != 0) {
+        MI32.infoMsg = MI32_SERV_CLIENT_AUTHENTICATED;
+        return;
+      }
+      ble_store_key_sec security_key;
+      memset(&security_key, 0, sizeof(security_key));
+      security_key.peer_addr = connection_desc.peer_id_addr;
+      ble_store_read_our_sec(&security_key, &our_security_record);
+      ble_store_read_peer_sec(&security_key, &peer_security_record);
+      memcpy(item.buffer, &our_security_record, security_record_size);
+      memcpy(item.buffer + security_record_size, &peer_security_record, security_record_size);
+      item.header.length = 2 * security_record_size;
       item.header.type = BLE_OP_ON_AUTHENTICATED;
-      ble_store_value_sec value_sec;
-      ble_sm_read_bond(connInfo.getConnHandle(), &value_sec);
-      memcpy(item.buffer,(uint8_t*)&value_sec,sizeof(ble_store_value_sec));
-      xRingbufferSend(BLERingBufferQueue, (const void*)&item, sizeof(BLERingBufferItem_t), pdMS_TO_TICKS(1));
+      xRingbufferSend(BLERingBufferQueue, (const void*)&item, sizeof(BLERingBufferItem_t) + item.header.length, pdMS_TO_TICKS(1));
       MI32.infoMsg = MI32_SERV_CLIENT_AUTHENTICATED;
     }
 };
@@ -253,17 +274,6 @@ class MI32CharacteristicCallbacks: public NimBLECharacteristicCallbacks {
     };
 
     void onWrite(NimBLECharacteristic* pCharacteristic, NimBLEConnInfo& connInfo) {
-        // TEMP DIAG (disabled, delete when stable): trace GATT writes
-        // size_t _wlen = pCharacteristic->getValue().size();
-        // const uint8_t* _wdata = pCharacteristic->getValue().data();
-        // AddLog(LOG_LEVEL_INFO,PSTR("BLE: TEMP onWrite uuid=%s handle=0x%04x len=%u first=%02X%02X%02X%02X"),
-        //        pCharacteristic->getUUID().toString().c_str(),
-        //        pCharacteristic->getHandle(),
-        //        (unsigned)_wlen,
-        //        _wlen > 0 ? _wdata[0] : 0,
-        //        _wlen > 1 ? _wdata[1] : 0,
-        //        _wlen > 2 ? _wdata[2] : 0,
-        //        _wlen > 3 ? _wdata[3] : 0);
         struct{
           BLERingBufferItem_t header;
           uint8_t buffer[255];
@@ -293,16 +303,13 @@ class MI32CharacteristicCallbacks: public NimBLECharacteristicCallbacks {
     };
 
     void onSubscribe(NimBLECharacteristic* pCharacteristic, NimBLEConnInfo& connInfo, uint16_t subValue) {
-        // TEMP DIAG (disabled, delete when stable): trace CCCD subscribe events
-        // AddLog(LOG_LEVEL_INFO,PSTR("BLE: TEMP onSubscribe uuid=%s handle=0x%04x subValue=0x%04x"),
-        //        pCharacteristic->getUUID().toString().c_str(),
-        //        pCharacteristic->getHandle(),
-        //        subValue);
         struct{
           BLERingBufferItem_t header;
         } item;
         item.header.length = 0;
-        item.header.type = BLE_OP_ON_UNSUBSCRIBE + subValue;;
+        // op = BLE_OP_ON_UNSUBSCRIBE + CCCD subValue: 224 = unsubscribe (0),
+        // 225 = notify (1), 226 = indicate (2). Berry receives the raw op number.
+        item.header.type = BLE_OP_ON_UNSUBSCRIBE + subValue;
         item.header.returnCharUUID = *reinterpret_cast<const uint16_t*>(pCharacteristic->getUUID().getValue() + 12);
         item.header.handle = pCharacteristic->getHandle();
         xRingbufferSend(BLERingBufferQueue, (const void*)&item, sizeof(BLERingBufferItem_t), pdMS_TO_TICKS(1));
@@ -311,7 +318,7 @@ class MI32CharacteristicCallbacks: public NimBLECharacteristicCallbacks {
 
 
 void MI32notifyCB(NimBLERemoteCharacteristic* pRemoteCharacteristic, uint8_t* pData, size_t length, bool isNotify){
-  AddLog(LOG_LEVEL_DEBUG,PSTR("M32: notifyCB uuid=%04x handle=%u len=%u isNotify=%u"),
+  AddLog(LOG_LEVEL_DEBUG_MORE,PSTR("M32: notifyCB uuid=%04x handle=%u len=%u isNotify=%u"),
     *reinterpret_cast<const uint16_t*>(pRemoteCharacteristic->getUUID().getValue() + 12),
     pRemoteCharacteristic->getHandle(), (unsigned)length, (unsigned)isNotify);
   if(isNotify){
@@ -763,7 +770,7 @@ void MI32Init(void) {
     const std::string name(TasmotaGlobal.hostname);
     NimBLEDevice::init(name);
     #ifdef CONFIG_BT_NIMBLE_NVS_PERSIST
-      NimBLEDevice::setSecurityAuth(true, true, true);
+      NimBLEDevice::setSecurityAuth(true, false, true); // with BLE_HS_IO_NO_INPUT_OUTPUT
     #else
       NimBLEDevice::setSecurityAuth(false, true, true);
       NimBLEDevice::setSecurityIOCap(BLE_HS_IO_KEYBOARD_DISPLAY);
@@ -792,11 +799,15 @@ extern "C" {
   }
 
   void MI32setBerryStoreRec(uint8_t *buffer, size_t size){
-    constexpr size_t sec_size = sizeof(ble_store_value_sec);
-    if(sec_size == size){
-      ble_store_write_peer_sec((const struct ble_store_value_sec*)&buffer);
-      AddLog(LOG_LEVEL_INFO,PSTR("BLE: write peer"));
+    constexpr size_t security_record_size = sizeof(ble_store_value_sec);
+    if(size != 2 * security_record_size){
+      AddLog(LOG_LEVEL_ERROR,PSTR("BLE: bond blob size %u unexpected"), (unsigned)size);
+      return;
     }
+    // Layout matches onAuthenticationComplete: [our_sec][peer_sec].
+    int our_result = ble_store_write_our_sec((const struct ble_store_value_sec*)buffer);
+    int peer_result = ble_store_write_peer_sec((const struct ble_store_value_sec*)(buffer + security_record_size));
+    AddLog(LOG_LEVEL_INFO,PSTR("BLE: restore bond our=%d peer=%d"), our_result, peer_result);
   }
 
   bool MI32runBerryConfig(uint16_t operation){
@@ -1520,7 +1531,7 @@ static void MI32RunClientOp(){
         if(pChr->canWrite() || pChr->canWriteNoResponse()){
           uint8_t len = MI32.conCtx->buffer[0];
           if(pChr->writeValue(MI32.conCtx->buffer + 1, len,
-                              MI32.conCtx->response & !pChr->canWriteNoResponse())){
+                              MI32.conCtx->response && !pChr->canWriteNoResponse())){
             MI32.conCtx->handle = pChr->getHandle();
           } else {
             MI32.conCtx->error = MI32_CONN_DID_NOT_WRITE;
@@ -1539,6 +1550,14 @@ static void MI32RunClientOp(){
           if(pChr->canNotify()){
             if(!pChr->subscribe(true, MI32notifyCB, MI32.conCtx->response)){
               MI32.conCtx->error = MI32_CONN_CAN_NOT_NOTIFY;
+            } else {
+              // Mirror the UUID-subscribe path's bookkeeping so Berry receives the
+              // resolved handle (1-handle payload, big-endian then little-endian
+              // pair as expected by the existing decoder).
+              MI32.conCtx->handle = pChr->getHandle();
+              MI32.conCtx->buffer[0] = 2;
+              MI32.conCtx->buffer[1] = pChr->getHandle() >> 8;
+              MI32.conCtx->buffer[2] = pChr->getHandle() & 0xff;
             }
           }
         } else {
@@ -2413,8 +2432,9 @@ void MI32BLELoop()
     if(q != nullptr){
       if(q->length != 0){
         memcpy(MI32.conCtx->buffer,&q->length,q->length + 1);
+      } else {
+        MI32.conCtx->buffer[0] = 0; // empty payload framing (memcpy above is skipped)
       }
-      MI32.conCtx->buffer[0] = q->length;
       MI32.conCtx->returnCharUUID = q->returnCharUUID;
       MI32.conCtx->handle = q->handle;
       MI32.conCtx->operation = q->type;
