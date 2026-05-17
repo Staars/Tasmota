@@ -97,7 +97,6 @@ static NimBLEClient* MI32Client;
 
 class MI32SensorCallback : public NimBLEClientCallbacks {
   void onConnect(NimBLEClient* pclient) {
-    // AddLog(LOG_LEVEL_DEBUG,PSTR("connected %s"), MI32getDeviceName(MI32.conCtx->slot));
     if (MI32.role & MI32_ROLE_SERVER) { // accepted-link bridge: don't hijack client-mode dispatch
       MI32.connID = pclient->getConnHandle();
       return;
@@ -118,7 +117,6 @@ class MI32SensorCallback : public NimBLEClientCallbacks {
     MI32.conCtx->error = reason;
     MI32.conCtx->operation = 5; //set for all disconnects that come from the remote device or connection loss
     MI32.mode.triggerBerryConnCB = 1;
-    //AddLog(LOG_LEVEL_DEBUG,PSTR("disconnected"));
   }
   void onPassKeyEntry(NimBLEConnInfo& connInfo) {
     NimBLEDevice::injectPassKey(connInfo, MI32.conCtx->pin);
@@ -195,18 +193,9 @@ class MI32ServerCallbacks: public NimBLEServerCallbacks {
         memcpy(item.buffer,connInfo.getAddress().getVal(),6);
         xRingbufferSend(BLERingBufferQueue, (const void*)&item, sizeof(BLERingBufferItem_t) + 6 , pdMS_TO_TICKS(1));
         MI32.infoMsg = MI32_SERV_CLIENT_CONNECTED;
-        // All conCtx-> derefs below need a single null guard. conCtx is normally
-        // alive for the entire bridge lifetime, but tearing the bridge down
-        // before the central disconnects is a plausible future op.
         if(MI32.conCtx == nullptr) return;
-        // Reverse-role client (ACNS-style): peripheral wants to act as GATT client
-        // toward the connected central over the same link. Singleton owned by
-        // NimBLEServer; do NOT delete via NimBLEDevice::deleteClient.
-        MI32.conCtx->serverPeer = pServer->getClient(connInfo);
+        MI32.conCtx->serverPeer = pServer->getClient(connInfo); // Singleton - do NOT delete via NimBLEDevice::deleteClient.
         if(MI32.conCtx->itvl_min != 0 && MI32.conCtx->itvl_max != 0){
-          // Note: occasional CP-write spikes (~1+s vs ~200ms typical) are iOS-side
-          // ATT scheduling within the negotiated connection interval, not a bridge
-          // bug. Tighter intervals reduce worst case but cost iOS battery.
           pServer->updateConnParams(connInfo.getConnHandle(), MI32.conCtx->itvl_min >> 1, MI32.conCtx->itvl_max >> 1, 0, 400);
         }
     };
@@ -230,9 +219,6 @@ class MI32ServerCallbacks: public NimBLEServerCallbacks {
 #endif
     };
     void onAuthenticationComplete(NimBLEConnInfo& connInfo) {
-      // Persist both records: peripheral-side reconnect needs OUR_SEC (host
-      // queries it on LL_LTK_REQ); PEER_SEC carries peer IRK/CSRK. Layout
-      // sent to Berry: [our_sec][peer_sec] back-to-back.
       constexpr size_t security_record_size = sizeof(ble_store_value_sec);
       struct{
         BLERingBufferItem_t header;
@@ -901,8 +887,6 @@ extern "C" {
     return true;
   }
 
-  // Single launch site for the unified MI32ConnectionTask.
-  // The task survives until conn_cb is cleared (function==nullptr).
   void MI32setBerryConnCB(void* function, uint8_t *buffer){
     if(function == nullptr || buffer == nullptr){
       MI32.mode.deleteConnectionTask = 1; // request task teardown if alive
@@ -938,10 +922,7 @@ extern "C" {
     AddLog(LOG_LEVEL_INFO,PSTR("BLE: Connection task started"));
   }
 
-  // Server callback collapsed onto beConnCB. Berry demuxes by op-code (103, 221..230, 1..7).
-  // Registering both BLE.conn_cb and BLE.serv_cb makes the second registration win;
-  // no current Berry script registers both.
-  void MI32setBerryServerCB(void* function, uint8_t *buffer){
+  void MI32setBerryServerCB(void* function, uint8_t *buffer){ //deprecated!
     MI32setBerryConnCB(function, buffer);
   }
 
@@ -1220,14 +1201,6 @@ void MI32saveConfig(){
  * Task section
 \*********************************************************************************************/
 
-void MI32suspendScanTask(void){
-  if (MI32.ScanTask != nullptr && MI32.mode.runningScan == 1) vTaskSuspend(MI32.ScanTask);
-}
-
-void MI32resumeScanTask(void){
-  if (MI32.ScanTask != nullptr && MI32.mode.runningScan == 1) vTaskResume(MI32.ScanTask);
-}
-
 void MI32StartTask(uint32_t task){
   if (MI32.mode.willConnect == 1) return; // we are in the middle of connecting to something ... do not interrupt this.
   switch(task){
@@ -1443,7 +1416,6 @@ static void MI32RunClientOp(){
     if(!MI32Client->isConnected()){
       if(!bridge){
         if(MI32Scan) MI32Scan->stop();
-        MI32suspendScanTask();
         MI32.mode.willConnect = 1;
       }
       if(!MI32Client->connect(false)){
@@ -1473,16 +1445,9 @@ static void MI32RunClientOp(){
     MI32.role |= MI32_ROLE_CLIENT; // tracks outbound MI32Client only
   }
 
-  // Full rediscovery is destructive: NimBLEClient::discoverAttributes() calls
-  // deleteServices() first, which invalidates every cached NimBLERemoteService
-  // and NimBLERemoteCharacteristic - including the m_notifyCallback that
-  // pChr->subscribe(...) registered on the previous instance. The CCCD on the
-  // peer stays enabled, so notifications keep arriving, but NimBLE's notify
-  // dispatch finds the new (un-callback'd) characteristic instance and silently
-  // drops them. Concretely on ANCS this kills DS notifications after NS subscribe
-  // re-runs discovery. Only rediscover when the cache is genuinely empty (first
-  // op on this client, or right after a hasArg1 handle-based op explicitly asked
-  // for it).
+  // discoverAttributes() drops cached services + their notify callbacks
+  // (CCCD stays on, but notifies get silently dropped). Only rediscover
+  // when cache is empty or caller asked via hasArg1.
   if(MI32.conCtx->hasArg1){
     activeClient->discoverAttributes();
   } else if(MI32.mode.discoverAttributes && activeClient->getServices(false).empty()){
@@ -1561,17 +1526,9 @@ static void MI32RunClientOp(){
             }
           }
         } else {
-          // Use cached characteristics (refresh=false). Passing true here calls
-          // NimBLERemoteService::retrieveCharacteristics() which wipes m_vChars
-          // and destroys every NimBLERemoteCharacteristic in this service,
-          // including any m_notifyCallback that an earlier subscribe(...) on
-          // the same service registered. The peer-side CCCD stays enabled, so
-          // notifications keep arriving from the peer, but NimBLE's notify
-          // dispatch finds the new (un-callback'd) characteristic instance and
-          // silently drops them. Concretely on ANCS: subscribing NS after DS
-          // would wipe DS's callback, killing DS notifications. The cache is
-          // already populated by the pSvc->getCharacteristic(...) call above
-          // (which lazily discovers on first access), so false is safe.
+          // refresh=false: getCharacteristics(true) would wipe m_vChars and
+          // kill prior subscribe callbacks (CCCD stays on, notifies drop).
+          // Cache is already populated by getCharacteristic(...) above.
           charvector = pSvc->getCharacteristics(false);
           uint32_t position = 1;
           for(auto &it: charvector){
@@ -1724,10 +1681,7 @@ void MI32ServerSetAdv(NimBLEServer *pServer, std::vector<NimBLEService*>& servic
     //TODO
 #else
     pAdvertising->setConnectableMode(MI32.conCtx->arg1);
-    // TEMP DIAG (disabled, delete when stable): bool _scmRc = pAdvertising->setConnectableMode(MI32.conCtx->arg1);
-    // AddLog(LOG_LEVEL_INFO,PSTR("BLE: TEMP setConnectableMode(%u) rc=%u"),MI32.conCtx->arg1,_scmRc);
 #endif
-    // AddLog(LOG_LEVEL_DEBUG,PSTR("BLE: AdvertisementType: %u"),MI32.conCtx->arg1);
   }
   struct{
     BLERingBufferItem_t header;
@@ -1737,37 +1691,16 @@ void MI32ServerSetAdv(NimBLEServer *pServer, std::vector<NimBLEService*>& servic
   if(shallStartServices && MI32.conCtx->operation == BLE_OP_SET_ADV){
     for (auto & pService : servicesToStart) {
         pService->start();
-        // TEMP DIAG (disabled, delete when stable):
-        // bool _svcRc = pService->start();
-        // AddLog(LOG_LEVEL_INFO,PSTR("BLE: TEMP pService->start() uuid=%s rc=%u"),
-        //        pService->getUUID().toString().c_str(),_svcRc);
-        // vTaskDelay(50 / portTICK_PERIOD_MS); // settle between service starts
     }
     shallStartServices = false; // only do this at the first run
     if(servicesToStart.size() != 0){
-      // TEMP DIAG (disabled, delete when stable): vTaskDelay(100 / portTICK_PERIOD_MS); // settle before pServer->start()
       pServer->start();         // only start server when svc and chr do exist
-      // TEMP DIAG (disabled, delete when stable): AddLog(LOG_LEVEL_INFO,PSTR("BLE: TEMP pServer->start() done"));
-      // TEMP DIAG (disabled, delete when stable): vTaskDelay(100 / portTICK_PERIOD_MS); // settle after pServer->start()
       uint32_t idx = 0;
       for (auto & pService : servicesToStart) {
         std::vector<NimBLECharacteristic *> characteristics = pService->getCharacteristics();
-        AddLog(LOG_LEVEL_DEBUG,PSTR("BLE: service started %u"),servicesToStart.size());
         for (auto & pCharacteristic : characteristics) {
           uint16_t handle = pCharacteristic->getHandle(); // now we have handles, so pass them to Berry
-          AddLog(LOG_LEVEL_DEBUG,PSTR("BLE: caracteristic started %s"),pCharacteristic->toString().c_str());
-          // TEMP DIAG (disabled, delete when stable): probe whether host auto-created a CCCD
-          // uint16_t _cccdHandle = 0;
-          // ble_uuid16_t _cccdUuid = { { BLE_UUID_TYPE_16 }, 0x2902 };
-          // int _findRc = ble_gatts_find_dsc(pService->getUUID().getBase(),
-          //                                  pCharacteristic->getUUID().getBase(),
-          //                                  (const ble_uuid_t*)&_cccdUuid,
-          //                                  &_cccdHandle);
-          // AddLog(LOG_LEVEL_INFO,PSTR("BLE: TEMP find CCCD chr=%s props=0x%04X rc=%d cccd=0x%04x"),
-          //        pCharacteristic->getUUID().toString().c_str(),
-          //        pCharacteristic->getProperties(),
-          //        _findRc,
-          //        _cccdHandle);
+          //AddLog(LOG_LEVEL_DEBUG,PSTR("BLE: characteristic started %s"),pCharacteristic->toString().c_str());
           item.buffer[idx] = (uint8_t)handle>>8;
           item.buffer[idx+1] = (uint8_t)handle&0xff;
           if (idx > 254) break; // limit to 127 characteristics
@@ -1787,10 +1720,6 @@ void MI32ServerSetAdv(NimBLEServer *pServer, std::vector<NimBLEService*>& servic
     if(pAdvertising->isAdvertising() == false && !shallStartServices){ // first advertisement
       vTaskDelay(1000/ portTICK_PERIOD_MS);   // work around to prevent crash on start
       pAdvertising->start(0);
-      // TEMP DIAG (disabled, delete when stable):
-      // bool _advStartRc = pAdvertising->start(0);
-      // AddLog(LOG_LEVEL_INFO,PSTR("BLE: TEMP pAdvertising->start(0) rc=%u"),_advStartRc);
-      // ble_gatts_show_local(); // NIMBLE_LOG_LEVEL=NONE may suppress output
     }
   } else
   {
@@ -1801,23 +1730,13 @@ void MI32ServerSetAdv(NimBLEServer *pServer, std::vector<NimBLEService*>& servic
   adv.addData((const uint8_t*)&MI32.conCtx->buffer[1], MI32.conCtx->buffer[0]);
   if(MI32.conCtx->operation == BLE_OP_SET_ADV){
     pAdvertising->setAdvertisementData(adv); // replace whole advertisement with our custom data from the Berry side
-    // TEMP DIAG (disabled, delete when stable):
-    // bool _sadRc = pAdvertising->setAdvertisementData(adv);
-    // AddLog(LOG_LEVEL_INFO,PSTR("BLE: TEMP setAdvertisementData rc=%u"),_sadRc);
     if(pAdvertising->isAdvertising() == false && !shallStartServices){ // first advertisement
       vTaskDelay(1000/ portTICK_PERIOD_MS);   // work around to prevent crash on start
       pAdvertising->start();
-      // TEMP DIAG (disabled, delete when stable):
-      // bool _advStartRc = pAdvertising->start();
-      // AddLog(LOG_LEVEL_INFO,PSTR("BLE: TEMP pAdvertising->start() rc=%u"),_advStartRc);
-      // ble_gatts_show_local(); // NIMBLE_LOG_LEVEL=NONE may suppress output
     }
   } else
   {
     pAdvertising->setScanResponseData(adv);
-    // TEMP DIAG (disabled, delete when stable):
-    // bool _ssrRc = pAdvertising->setScanResponseData(adv);
-    // AddLog(LOG_LEVEL_INFO,PSTR("BLE: TEMP setScanResponseData rc=%u"),_ssrRc);
     pAdvertising->enableScanResponse(true);
   }
 #endif //CONFIG_BT_NIMBLE_EXT_ADV
@@ -1860,8 +1779,7 @@ void MI32ServerSetCharacteristic(NimBLEServer *pServer, std::vector<NimBLEServic
     if(MI32.conCtx->hasArg1){
       _property = MI32.conCtx->arg1;    // override with optional argument
     }
-    AddLog(LOG_LEVEL_INFO,PSTR("BLE: createCharacteristic %s _property=0x%02X shallStartServices=%u"),
-           MI32.conCtx->charUUID.toString().c_str(), _property, shallStartServices);
+    // AddLog(LOG_LEVEL_DEBUG,PSTR("BLE: createCharacteristic %s _property=0x%02X shallStartServices=%u"), MI32.conCtx->charUUID.toString().c_str(), _property, shallStartServices);
     pCharacteristic = pService->createCharacteristic(MI32.conCtx->charUUID,
                                                      _property);  //... or create characteristic.
     if(pCharacteristic == nullptr){
@@ -1870,17 +1788,9 @@ void MI32ServerSetCharacteristic(NimBLEServer *pServer, std::vector<NimBLEServic
     }
     pCharacteristic->setCallbacks(&MI32ChrCallback);
     MI32.infoMsg = MI32_SERV_CHARACTERISTIC_ADDED;
-    // TEMP DIAG (disabled, delete when stable): vTaskDelay(50 / portTICK_PERIOD_MS); // settle after createCharacteristic
   }
   pCharacteristic->setValue(MI32.conCtx->buffer + 1, MI32.conCtx->buffer[0]); // set value
   MI32.conCtx->response ? pCharacteristic->indicate() : pCharacteristic->notify(); // use response to select indicate vs notification
-  // TEMP DIAG (disabled, delete when stable):
-  // bool _indNotRc = MI32.conCtx->response ? pCharacteristic->indicate() : pCharacteristic->notify();
-  // AddLog(LOG_LEVEL_INFO,PSTR("BLE: TEMP %s() chr=%s handle=0x%04x rc=%u"),
-  //        MI32.conCtx->response ? "indicate" : "notify",
-  //        pCharacteristic->getUUID().toString().c_str(),
-  //        pCharacteristic->getHandle(),
-  //        _indNotRc);
   struct{
     BLERingBufferItem_t header;
   } item;
@@ -2414,15 +2324,9 @@ void MI32BLELoop()
     MI32.mode.triggerBerryConnCB = 0;
   }
 
-  // server callback (bridge mode: connected==0 because the outbound MI32Client
-  // is not in use). Drain the ring buffer through the same deferred path as the
-  // client branch above: stage into conCtx, raise triggerBerryConnCB, and let
-  // the unified dispatch block fire on the next loop tick. This serializes
-  // bridge notifications (op==103) with worker-task op completions and prevents
-  // conCtx from being overwritten mid-dispatch.
-  // triggerNextJob==0 guard: Berry's previous callback may have synchronously
-  // staged a new op into conCtx; we must NOT clobber it before ConnectionTask
-  // consumes it (that consumption clears triggerNextJob).
+  // Bridge mode (connected==0): drain ring buffer into conCtx and defer
+  // dispatch via triggerBerryConnCB, same as the client branch above.
+  // triggerNextJob==0 guard: don't clobber an op Berry just staged.
   if(MI32.mode.connected == 0 && BLERingBufferQueue != nullptr
      && MI32.mode.triggerBerryConnCB == 0 && MI32.mode.readyForNextJob == 1
      && MI32.mode.triggerNextJob == 0){
@@ -2858,7 +2762,6 @@ void MI32Show(bool json)
       if(MI32.option.noSummary == 1) return; // no message at TELEPERIOD
       }
     if(TasmotaGlobal.masterlog_level == LOG_LEVEL_DEBUG_MORE) return; // we want to announce sensors unlinked to the ESP, check for LOG_LEVEL_DEBUG_MORE is medium-safe
-    MI32suspendScanTask();
     for (uint32_t i = 0; i < MIBLEsensors.size(); i++) {
       if(MI32.mode.triggeredTele == 1 && MIBLEsensors[i].eventType.raw == 0) continue;
       if(MI32.mode.triggeredTele == 1 && MIBLEsensors[i].shallSendMQTT==0) continue;
@@ -3027,11 +2930,8 @@ void MI32Show(bool json)
     MI32addHistory(MI32.energy_history,Energy->active_power[0],100); //TODO: which value??
 #endif //USE_MI_ESP32_ENERGY
 #endif //USE_MI_EXT_GUI
-    MI32resumeScanTask();
 #ifdef USE_WEBSERVER
     } else {
-      MI32suspendScanTask();
-
       WSContentSend_P(HTTP_MI32, MIBLEsensors.size());
 
 #ifndef USE_MI_EXT_GUI
@@ -3086,7 +2986,6 @@ void MI32Show(bool json)
 #endif //USE_MI_EXT_GUI
 #endif  // USE_WEBSERVER
     }
-    MI32resumeScanTask();
 }
 
 int ExtStopBLE(){
