@@ -153,6 +153,9 @@ uDisplay::uDisplay(char *lp) : Renderer(800, 600) {
                 digitalWrite(reset, HIGH);
                 delay(50);
                 reset_pin(50, 200);
+#ifdef UDSP_DEBUG
+                AddLog(LOG_LEVEL_DEBUG, "UDisplay: RGB/SSPI resetting device on pin %d", reset);
+#endif
               }
 #ifdef UDSP_DEBUG
               AddLog(LOG_LEVEL_DEBUG, "UDisplay: SSPI_MOSI:%d SSPI_SCLK:%d SSPI_CS:%d DSP_RESET:%d", spiController->spi_config.mosi, spiController->spi_config.clk, spiController->spi_config.dc, reset);
@@ -1161,6 +1164,18 @@ Renderer *uDisplay::Init(void) {
 #endif // ESP32
 
     if (wire) {
+      // Apply hardware reset pulse if a reset pin is configured
+      // (e.g. some OLED modules with an RST line)
+      if (reset >= 0) {
+        pinMode(reset, OUTPUT);
+        digitalWrite(reset, HIGH);
+        delay(10);
+        reset_pin(10, 200);
+#ifdef UDSP_DEBUG
+        AddLog(LOG_LEVEL_DEBUG, "UDisplay: I2C resetting device on pin %d", reset);
+#endif
+      }
+
       // Populate remaining I2C config fields (most already parsed directly into union)
       panel_config->i2c.width = gxs;
       panel_config->i2c.height = gys;
@@ -1188,7 +1203,7 @@ if (interface == _UDSP_SPI) {
       delay(50);
       reset_pin(50, 200);
 #ifdef UDSP_DEBUG
-      AddLog(LOG_LEVEL_DEBUG, "UDisplay: resetting device");
+      AddLog(LOG_LEVEL_DEBUG, "UDisplay: SPI resetting device on pin %d", reset);
 #endif
     }
     
@@ -1231,7 +1246,7 @@ if (interface == _UDSP_SPI) {
         // Set update mode to partial for subsequent updates
         epd->setUpdateMode(DISPLAY_INIT_PARTIAL);
     } else {   
-        AddLog(2,"SPI Panel!");
+        AddLog(2,"DSP: SPI Panel");
         // Populate remaining SPI config fields (most already parsed directly into union)
         panel_config->spi.width = gxs;
         panel_config->spi.height = gys;
@@ -1322,6 +1337,9 @@ if (interface == _UDSP_SPI) {
           digitalWrite(reset, HIGH);
           delay(50);
           reset_pin(50, 200);
+#ifdef UDSP_DEBUG
+          AddLog(LOG_LEVEL_DEBUG, "UDisplay: PAR resetting device on pin %d", reset);
+#endif
       }
       
       // Populate remaining I80 config fields (most already parsed directly into union)
