@@ -2554,10 +2554,17 @@ void MI32createGraph(char *buffer, uint8_t *history, uint8_t r, uint8_t g, uint8
 #ifdef USE_MI_ESP32_ENERGY
 void MI32sendEnergyWidget(){
   if (Energy->current_available && Energy->voltage_available) {
-    WSContentSend_P(HTTP_MI32_POWER_WIDGET,MIBLEsensors.size()+1, Energy->voltage,Energy->current[1]);
+    // picolibc integer-only vfprintf: route floats through ext_snprintf_P (%*_f, pass-by-pointer)
+    char _voltStr[16];
+    char _currStr[16];
+    char _powStr[16];
+    ext_snprintf_P(_voltStr, sizeof(_voltStr), PSTR("%*_f"), -1, &Energy->voltage[0]);
+    ext_snprintf_P(_currStr, sizeof(_currStr), PSTR("%*_f"), -3, &Energy->current[1]);
+    ext_snprintf_P(_powStr,  sizeof(_powStr),  PSTR("%*_f"), -1, &Energy->active_power[0]);
+    WSContentSend_P(HTTP_MI32_POWER_WIDGET, MIBLEsensors.size()+1, _voltStr, _currStr);
     char _graph[256];
     MI32createGraph(_graph, MI32.energy_history, 185, 124, 124);
-    WSContentSend_P(PSTR("<p>" D_POWERUSAGE ": %.1f " D_UNIT_WATT "%s</p></div>"), Energy->active_power, _graph);
+    WSContentSend_P(PSTR("<p>" D_POWERUSAGE ": %s " D_UNIT_WATT "%s</p></div>"), _powStr, _graph);
   }
 }
 #endif //USE_MI_ESP32_ENERGY
@@ -2616,22 +2623,31 @@ void MI32sendWidget(uint32_t slot){
     if(!isnan(_sensor.temp)){
       char _graph[256];
       MI32createGraph(_graph, _sensor.temp_history, 185, 124, 124);
-      WSContentSend_P(PSTR("<p>" D_JSON_TEMPERATURE ": %.1f °C%s</p>"), _sensor.temp, _graph);
+      char _tempStr[16];
+      ext_snprintf_P(_tempStr, sizeof(_tempStr), PSTR("%*_f"), -1, &_sensor.temp);
+      WSContentSend_P(PSTR("<p>" D_JSON_TEMPERATURE ": %s °C%s</p>"), _tempStr, _graph);
     }
     if(!isnan(_sensor.hum)){
       char _graph[256];
       MI32createGraph(_graph, _sensor.hum_history, 151, 190, 216);
-      WSContentSend_P(PSTR("<p>" D_JSON_HUMIDITY ": %.1f %%%s</p>"), _sensor.hum, _graph);
+      char _humStr[16];
+      ext_snprintf_P(_humStr, sizeof(_humStr), PSTR("%*_f"), -1, &_sensor.hum);
+      WSContentSend_P(PSTR("<p>" D_JSON_HUMIDITY ": %s %%%s</p>"), _humStr, _graph);
     }
     if(!isnan(_sensor.temp) && !isnan(_sensor.hum)){
-      WSContentSend_P(PSTR("" D_JSON_DEWPOINT ": %.1f °C"),CalcTempHumToDew(_sensor.temp,_sensor.hum));
+      char _dewStr[16];
+      float _dewVal = CalcTempHumToDew(_sensor.temp, _sensor.hum);
+      ext_snprintf_P(_dewStr, sizeof(_dewStr), PSTR("%*_f"), -1, &_dewVal);
+      WSContentSend_P(PSTR("" D_JSON_DEWPOINT ": %s °C"), _dewStr);
     }
   }
   else if(_sensor.feature.temp == 1){
     if(!isnan(_sensor.temp)){
       char _graph[256];
       MI32createGraph(_graph, _sensor.temp_history, 185, 124, 124);
-      WSContentSend_P(PSTR("<p>" D_JSON_TEMPERATURE ": %.1f °C%s</p>"), _sensor.temp, _graph);
+      char _tempStr[16];
+      ext_snprintf_P(_tempStr, sizeof(_tempStr), PSTR("%*_f"), -1, &_sensor.temp);
+      WSContentSend_P(PSTR("<p>" D_JSON_TEMPERATURE ": %s °C%s</p>"), _tempStr, _graph);
     }
   }
   if(_sensor.feature.lux == 1){
