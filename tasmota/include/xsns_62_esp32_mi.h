@@ -250,14 +250,8 @@ struct {
   void *beAdvCB;
   uint8_t *beAdvBuf;
   uint8_t infoMsg = 0;
-  uint8_t role = 0; // bitfield of MI32_ROLE_* (concurrently active roles)
+  uint8_t role = 0; // bitfield of MI32Role values (concurrently active roles)
 } MI32;
-
-// MI32.role bit layout (concurrently-active roles, not mutually exclusive)
-#define MI32_ROLE_SCAN       0x01
-#define MI32_ROLE_CLIENT     0x02
-#define MI32_ROLE_SERVER     0x04
-#define MI32_ROLE_ADVERTISER 0x08
 
 struct mi_sensor_t{
   uint8_t type; //Flora = 1; MI-HT_V1=2; LYWSD02=3; LYWSD03=4; CGG1=5; CGD1=6
@@ -469,6 +463,15 @@ enum MI32_ConnErrorMsg {
   MI32_CONN_NOTIFY_TIMEOUT
 };
 
+// MI32.role bit layout (concurrently-active roles, not mutually exclusive)
+enum MI32Role : uint8_t {
+  MI32_ROLE_NONE       = 0x00,
+  MI32_ROLE_SCAN       = 0x01,
+  MI32_ROLE_CLIENT     = 0x02,
+  MI32_ROLE_SERVER     = 0x04,
+  MI32_ROLE_ADVERTISER = 0x08,
+};
+
 enum MI32_BLEInfoMsg {
   MI32_SCAN_ENDED = 1,
   MI32_GOT_NOTIFICATION,
@@ -517,8 +520,8 @@ const char HTTP_MI32_POWER_WIDGET[] PROGMEM =
   "<div class='box' id='box%u'>"
    "<h2 style='margin-top:0em;'>Energy"
   "</h2>"
-  "<p>" D_VOLTAGE ": %.1f " D_UNIT_VOLT "</p>"
-  "<p>" D_CURRENT ": %.3f " D_UNIT_AMPERE "</p>";
+  "<p>" D_VOLTAGE ": %s " D_UNIT_VOLT "</p>"
+  "<p>" D_CURRENT ": %s " D_UNIT_AMPERE "</p>";
 #endif //USE_MI_ESP32_ENERGY
 
 /*
