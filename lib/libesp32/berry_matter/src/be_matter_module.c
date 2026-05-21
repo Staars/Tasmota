@@ -273,6 +273,10 @@ extern const bclass be_class_Matter_TLV;   // need to declare it upfront because
 #include "solidify/solidified_Matter_Plugin_9_Zigbee_Humidity.h"
 #include "solidify/solidified_Matter_Plugin_9_Zigbee_Occupancy.h"
 #include "solidify/solidified_Matter_Plugin_z_All.h"
+#ifdef USE_MI_EXT_GUI
+#include "solidify/solidified_Matter_BTP.h"
+#include "solidify/solidified_Matter_zz_Device_BLE.h"
+#endif //USE_MI_EXT_GUI
 #include "solidify/solidified_Matter_zz_Device.h"
 
 #include "be_fixed_matter.h"
@@ -435,6 +439,12 @@ module matter (scope: global, strings: weak) {
 
   // Base38 for QR Code
   Base38, class(be_class_Matter_Base38)
+
+  // BTP for BLE
+  BTP, class(be_class_Matter_BTP)
+
+  // Matter BLE Device core class
+  Device_BLE, class(be_class_Matter_Device_BLE)
 
   // Matter Device core class
   Device, class(be_class_Matter_Device)
