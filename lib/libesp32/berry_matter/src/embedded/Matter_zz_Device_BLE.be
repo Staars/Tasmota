@@ -44,6 +44,20 @@ class Matter_Device_BLE : Matter_Device
     var ble_ready
     var deferred_connect_network       # holds msg frame for deferred ConnectNetwork response
     var cbuf                           # shared BLE I/O buffer (bytes(-255))
+    # commissioning progress / error tracking
+    var saw_ble_peer                   # set when GATT op 227 fires (commissioner connected)
+    var saw_pase_start                 # set when PASE has begun (admin_fabric assigned)
+    var last_wifi_result               # last wifitest1 string from a deferred ConnectNetwork
+
+    # failure reason constants - kept as plain strings for easy logging
+    static var REASON_SUCCESS             = "success"
+    static var REASON_BLE_DROP            = "ble_drop"
+    static var REASON_PASE_FAILED         = "pase_failed"
+    static var REASON_WIFI_FAILED         = "wifi_failed"
+    static var REASON_WIFI_TIMEOUT        = "wifi_timeout"
+    static var REASON_WINDOW_TIMEOUT      = "window_timeout"
+    static var REASON_ALREADY_COMMISSIONED = "already_commissioned"
+    static var REASON_UNKNOWN             = "unknown"
 
     def init()
         import cb
@@ -54,13 +68,7 @@ class Matter_Device_BLE : Matter_Device
             global.matter_device = self
             tasmota.gc()
         end
-        self.cbuf = bytes(-255)
-        matter.profiler = matter.Profiler()
-        var cbp = cb.gen_cb(/e,o,u,h->self.cb(e,o,u,h))
-        BLE.serv_cb(cbp, self.cbuf)
-        self.current_func = /->self.init_C1()
-        BLE.set_svc("FFF6")
-        self.btp = matter.BTP(self)
+        # minimal setup to inspect persisted state before bringing BLE up
         self.plugins = []
         self.plugins_persist = false
         self.plugins_config_remotes = {}
@@ -70,6 +78,24 @@ class Matter_Device_BLE : Matter_Device
         self.load_param()
         self.sessions = matter.Session_Store(self)
         self.sessions.load_fabrics()
+
+        # if device is already commissioned, do NOT bring BLE up.
+        # Let the application decide what to do (delete fabrics, restart, go operational, ...).
+        var fabric_count = self.sessions.count_active_fabrics()
+        if fabric_count > 0
+            var ctx = {'reason': self.REASON_ALREADY_COMMISSIONED, 'detail': '', 'fabric_count': fabric_count}
+            log(f"MTR: BLE commissioning skipped - device already commissioned (fabrics={fabric_count:i})", 2)
+            self.on_commissioning_failure(ctx)
+            return
+        end
+
+        self.cbuf = bytes(-255)
+        matter.profiler = matter.Profiler()
+        var cbp = cb.gen_cb(/e,o,u,h->self.cb(e,o,u,h))
+        BLE.serv_cb(cbp, self.cbuf)
+        self.current_func = /->self.init_C1()
+        BLE.set_svc("FFF6")
+        self.btp = matter.BTP(self)
         self.tick = 0
         self.message_handler = matter.MessageHandler(self)
         self.events = matter.EventHandler(self)
@@ -79,18 +105,19 @@ class Matter_Device_BLE : Matter_Device
         tasmota.add_driver(self)
         self.on_ble_init()
         self.ble_ready = true
-        log(format("BLE: start MATTER commissionee, discriminator:%i", self.root_discriminator), 1)
+        log(f"BLE: start MATTER commissionee, discriminator:{self.root_discriminator:i}", 1)
     end
 
     # ---------------------------------------------------------------------------
     # Subclass hooks - empty defaults
     # ---------------------------------------------------------------------------
-    def on_ble_init()            end
-    def on_ble_ready()           end
-    def on_ble_disconnected()    end
-    def on_commissioning_success() end
-    def on_commissioning_failure() end
-    def heart_beat()             end
+    # ctx for success/failure hooks is a map: { 'reason': <REASON_*>, 'detail': <str>, 'fabric_count': <int> }
+    def on_ble_init()                end
+    def on_ble_ready()               end
+    def on_ble_disconnected()        end
+    def on_commissioning_success(ctx) end
+    def on_commissioning_failure(ctx) end
+    def heart_beat()                 end
 
     # ---------------------------------------------------------------------------
     # Driver lifecycle
@@ -116,6 +143,10 @@ class Matter_Device_BLE : Matter_Device
         self.message_handler.every_second()
         self.events.every_second()
         self.commissioning.every_second()
+        # latch PASE start as soon as commissioner kicks off SPAKE2+
+        if !self.saw_pase_start && self.commissioning && self.commissioning.commissioning_admin_fabric != nil
+            self.saw_pase_start = true
+        end
         if self.check_if_commissioned == true
             self.check_final()
         end
@@ -130,6 +161,7 @@ class Matter_Device_BLE : Matter_Device
 
         var msg = self.deferred_connect_network
         self.deferred_connect_network = nil
+        self.last_wifi_result = r
 
         import global
         var TLV = matter.TLV
@@ -149,21 +181,21 @@ class Matter_Device_BLE : Matter_Device
             try
                 self.commissioning._mdns_announce_hostname(false)
             except .. as e, m
-                log(format("MTR: mDNS hostname FAILED: %s %s", str(e), str(m)), 2)
+                log(f"MTR: mDNS hostname FAILED: {e} {m}", 2)
             end
             for fabric : self.sessions.fabrics
                 if fabric.get_device_id() && fabric.get_fabric_id()
                     try
                         self.commissioning.mdns_announce_op_discovery(fabric)
                     except .. as e, m
-                        log(format("MTR: mDNS op_discovery FAILED: %s %s", str(e), str(m)), 2)
+                        log(f"MTR: mDNS op_discovery FAILED: {e} {m}", 2)
                     end
                 end
             end
         else
             cnresp.add_TLV(0, 0x04 #-TLV.U1-#, 0x01 #-FAILURE-#)
             cnresp.add_TLV(1, 0x0D #-TLV.UTF2-#, format("wifi connect failed: %s", r))
-            log(format("MTR: ConnectNetwork deferred -> Failed: %s", r), 2)
+            log(f"MTR: ConnectNetwork deferred -> Failed: {r}", 2)
         end
         cnresp.add_TLV(2, 0x02 #-TLV.I4-#, 0)    # NetworkIndex
 
@@ -225,7 +257,7 @@ class Matter_Device_BLE : Matter_Device
             if (msg.flags & matter.BTP.F_END)
                 if size(msg.combined_payload) == 0  return end
                 if is_synced
-                    log(format("BLE: <<< %i bytes", self.cbuf[0]))
+                    log(f"BLE: <<< {self.cbuf[0]:i} bytes")
                     self.message_handler.msg_received(msg.combined_payload, "BLE", 0)
                 end
                 msg.delete()
@@ -242,16 +274,77 @@ class Matter_Device_BLE : Matter_Device
         if self.commissioning && self.commissioning.is_commissioning_open()
             return
         end
-        import path
-        if path.exists("_matter_fabrics.json")
-            log("MTR: Successfully finished BLE commissioning.")
-            self.on_commissioning_success()
+        var fabric_count = self.sessions.count_active_fabrics()
+        if fabric_count > 0
+            log("MTR: Successfully finished BLE commissioning.", 2)
+            self.on_commissioning_success({'reason': self.REASON_SUCCESS, 'detail': '', 'fabric_count': fabric_count})
         else
-            log("MTR: commissioning failure")
-            self.on_commissioning_failure()
-            tasmota.cmd("restart 1")
+            log("MTR: commissioning failure", 2)
+            self.on_commissioning_failure({'reason': self.REASON_UNKNOWN, 'detail': '', 'fabric_count': 0})
+            self.rearm()
         end
         self.check_if_commissioned = false
+    end
+
+    # Handle a BLE disconnect event - decide whether it is a normal completion
+    # (PASE/CASE done, fabrics stored) or a premature drop that needs recovery.
+    # Called from cb() op 228. Single source of truth for disconnect logic.
+    def handle_disconnect()
+        # always notify subclass first
+        self.on_ble_disconnected()
+
+        var fabric_count = self.sessions.count_active_fabrics()
+        var pase_open    = self.commissioning && self.commissioning.is_commissioning_open()
+
+        if fabric_count > 0 && !pase_open
+            # clean disconnect after commissioning succeeded - defer to check_final
+            # via the every_second() tick so success is reported in one place
+            log("BLE: disconnect after successful commissioning", 2)
+            self.check_if_commissioned = true
+            return
+        end
+
+        # PREMATURE disconnect - PASE window may still be open so check_final()
+        # would early-return; classify and recover here directly.
+        log(f"BLE: PREMATURE disconnect (fabrics={fabric_count:i}, pase_open={pase_open}, saw_pase={self.saw_pase_start}, saw_peer={self.saw_ble_peer})", 2)
+
+        var ctx = {'reason': self.REASON_UNKNOWN, 'detail': '', 'fabric_count': fabric_count}
+        if self.last_wifi_result != nil && self.last_wifi_result != "Successful"
+            ctx['reason'] = self.REASON_WIFI_FAILED
+            ctx['detail'] = self.last_wifi_result
+        elif self.deferred_connect_network != nil
+            ctx['reason'] = self.REASON_WIFI_TIMEOUT
+        elif self.saw_pase_start
+            ctx['reason'] = self.REASON_PASE_FAILED
+        elif self.saw_ble_peer
+            ctx['reason'] = self.REASON_BLE_DROP
+        else
+            ctx['reason'] = self.REASON_WINDOW_TIMEOUT
+        end
+
+        log(f"MTR: commissioning failure reason={ctx['reason']} detail={ctx['detail']}", 2)
+        self.on_commissioning_failure(ctx)
+        self.check_if_commissioned = false
+        self.rearm()
+    end
+
+    # Return to a clean state where a new commissioner can connect.
+    # Idempotent. Safe to call from a subclass hook.
+    def rearm()
+        log("MTR: rearming BLE commissioning", 2)
+        self.deferred_connect_network = nil
+        self.last_wifi_result = nil
+        self.saw_ble_peer = false
+        self.saw_pase_start = false
+        self.btp = matter.BTP(self)
+        try
+            self.commissioning.stop_basic_commissioning()
+        except .. as e, m
+            log(f"MTR: rearm stop_basic_commissioning err: {e} {m}", 3)
+        end
+        self.commissioning.init_basic_commissioning()
+        self.ble_ready = true
+        self.current_func = /->self.init_C1()
     end
 
     def ble_send(payload)
@@ -261,7 +354,7 @@ class Matter_Device_BLE : Matter_Device
         BLE.set_chr("18EE2EF5-263D-4559-959F-4F9C429F9D12")
         BLE.run(211, true)
         self.ble_ready = false
-        log(format("BLE: >>> %i bytes", self.cbuf[0]))
+        log(f"BLE: >>> {self.cbuf[0]:i} bytes")
         self.then(/->self.wait())
         tasmota.defer(/->self.heart_beat())
         return true
@@ -272,18 +365,19 @@ class Matter_Device_BLE : Matter_Device
     # ---------------------------------------------------------------------------
     def cb(error, op, uuid, handle)
         if op == 201
-            log(format("BLE: Handles created: %s", self.cbuf[1..self.cbuf[0]].tohex()))
+            log(f"BLE: Handles created: {self.cbuf[1..self.cbuf[0]].tohex()}")
         elif op == 222
             self.parse()
         elif op == 224 || op == 225
-            log(format("BLE: Subscribed to %s", op == 224 ? "notification" : "indication"))
+            var kind = op == 224 ? "notification" : "indication"
+            log(f"BLE: Subscribed to {kind}")
             self.next_func = /->self.handshake_ack()
         elif op == 227
             log(format("BLE: peer MAC: %s", self.cbuf[1..self.cbuf[0]].tohex()))
+            self.saw_ble_peer = true
         elif op == 228
             log("BLE: Disconnected")
-            self.check_if_commissioned = true
-            self.on_ble_disconnected()
+            self.handle_disconnect()
         elif op == 229
             self.ble_ready = true
             log("BLE: stack ready")
