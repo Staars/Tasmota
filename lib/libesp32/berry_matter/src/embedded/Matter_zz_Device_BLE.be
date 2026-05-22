@@ -373,7 +373,7 @@ class Matter_Device_BLE : Matter_Device
             log(f"BLE: Subscribed to {kind}")
             self.next_func = /->self.handshake_ack()
         elif op == 227
-            log(format("BLE: peer MAC: %s", self.cbuf[1..self.cbuf[0]].tohex()))
+            log(f"BLE: peer MAC: {self.cbuf[1..self.cbuf[0]].tohex()}")
             self.saw_ble_peer = true
         elif op == 228
             log("BLE: Disconnected")
