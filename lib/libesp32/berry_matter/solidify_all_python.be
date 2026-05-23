@@ -87,10 +87,7 @@ def parse_file(fname, prefix_out)
         obj_name = 'module_' + obj_name
       end
     end
-    var t = type(o)
-    if t == 'function' || t == 'class' || t == 'module'
-      solidify.dump(o, weak, fout, cl_name)
-    end
+    solidify.dump(o, weak, fout, cl_name)
   end
 
   fout.write("/********************************************************************/\n")
