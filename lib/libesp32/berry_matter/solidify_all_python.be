@@ -87,7 +87,18 @@ def parse_file(fname, prefix_out)
         obj_name = 'module_' + obj_name
       end
     end
-    solidify.dump(o, weak, fout, cl_name)
+    var t = type(o)
+    if t == 'class' || t == 'module' || t == 'function'
+      solidify.dump(o, weak, fout, cl_name)
+    else
+      # Class/module not defined in this build (e.g. gated behind a Berry
+      # `#if FLAG` that is not set in tasmota_defines_for_berry.be).
+      # Emit no body. coc will see no `extern const bclass be_class_<name>`
+      # in the resulting header and silently drop any matching entry in
+      # `@const_object_info_begin`.
+      print(f"INFO: '{object_name}' not built in this env ({fname}); emitting empty header")
+    end
+
   end
 
   fout.write("/********************************************************************/\n")

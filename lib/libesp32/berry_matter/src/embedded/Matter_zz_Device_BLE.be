@@ -17,10 +17,10 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 
-#if USE_MI_EXT_GUI
 import matter
 
 #@ solidify:Matter_Device_BLE,weak
+#if USE_MI_EXT_GUI
 
 #################################################################################
 # Matter_Device_BLE

@@ -1,5 +1,6 @@
 import copy
 import json
+import re
 from hash_map import *
 
 class block:
@@ -16,10 +17,31 @@ def depend(obj, macro):
     else:
         return True
 
+# Any identifier in a `@const_object_info_*` entry value that matches one of
+# these prefixes is treated as a Berry-object symbol that must be present in
+# the global symbol table (collected by coc_parser from `extern` forward
+# declarations across all scanned files). Anything else (e.g. plain C
+# function names passed to `func(...)`) is ignored and assumed to be
+# externally satisfied.
+_BERRY_SYM_RE = re.compile(
+    r"\b(be_(?:class|module|native_module|const|func)_[A-Za-z0-9_]+)\b"
+)
+
+def _symbols_satisfied(value, symbols):
+    """Return True if every Berry-object symbol referenced by `value` is
+    present in `symbols`. Entries with no Berry-object identifier always
+    pass (e.g. `int(1)`, `string("x")`, `func(plain_c_function)`)."""
+    if not value or symbols is None:
+        return True
+    for ident in _BERRY_SYM_RE.findall(value):
+        if ident not in symbols:
+            return False
+    return True
+
 class block_builder:
     """Output an object"""
 
-    def __init__(self, obj, macro):
+    def __init__(self, obj, macro, symbols=None):
         self.block = block()
         self.strtab = []
         self.strtab_weak = []
@@ -38,13 +60,19 @@ class block_builder:
             
             for key in obj.data_ordered:
                 second = obj.data[key]
-                if second.depend == None or macro.query(second.depend):
-                    self.block.data[key] = second.value
-                    if not self.get_strings_literal(self.block):
-                        self.strtab.append(key)
-                    else:
-                        self.strtab_weak.append(key)
-                    self.block.data_ordered.append(key)
+                if second.depend != None and not macro.query(second.depend):
+                    continue
+                if not _symbols_satisfied(second.value, symbols):
+                    # Drop entries referencing Berry-object symbols that
+                    # were not produced in this build (e.g. a class whose
+                    # `.be` source was gated out by `#if FLAG`).
+                    continue
+                self.block.data[key] = second.value
+                if not self.get_strings_literal(self.block):
+                    self.strtab.append(key)
+                else:
+                    self.strtab_weak.append(key)
+                self.block.data_ordered.append(key)
     
     def block_tostring(self, block):
         ostr = ""
