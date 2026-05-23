@@ -17,10 +17,10 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 
-#if USE_MI_EXT_GUI
 import matter
 
 #@ solidify:Matter_BTP,weak
+#if USE_MI_EXT_GUI
 
 #################################################################################
 # Matter_BTP
@@ -207,4 +207,6 @@ class Matter_BTP
 end
 
 matter.BTP = Matter_BTP
+#else
+class Matter_BTP end # will be discarded
 #endif // USE_MI_EXT_GUI
