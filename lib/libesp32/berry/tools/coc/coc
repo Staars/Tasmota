@@ -22,36 +22,14 @@ class builder:
         self.strmap_weak = {}
         self.strmap_long = {}
         self.bytesmap = {}
-        # Set of Berry object symbols (be_class_*, be_module_*, ...) declared
-        # by `extern` forward declarations in any scanned file. Populated by
-        # the first pass; consumed by block_builder to drop registrations of
-        # symbols that were not produced in this build.
-        self.symbols = set()
-        # Collected per-file `(filename, parser)` tuples from the first pass.
-        # We need the parser instances to walk the parsed objects during the
-        # second pass, after the global symbol table is fully populated.
-        self._pending = []
 
         self.macro = macro_table()
         for path in self.config:
             self.macro.scan_file(path)                
 
-        # Pass 1 — discover symbols and stash parsed objects.
         for d in self.input:
             self.scandir(d)
-
-        # Pass 2 — emit objects, now that `self.symbols` is complete.
-        for filename, parser in self._pending:
-            for obj in parser.objects:
-                builder = block_builder(obj, self.macro, self.symbols)
-                for s in builder.strtab:
-                    self.strmap[s] = 0
-                for s in builder.strtab_weak:
-                    self.strmap_weak[s] = 0
-                for s in builder.strtab_long:
-                    self.strmap_long[s] = 0
-                builder.dumpfile(self.output)
-
+        
         sb = str_build(self.strmap, self.strmap_weak, self.strmap_long)
         sb.build(self.output)
 
@@ -74,9 +52,15 @@ class builder:
                 self.strmap_long[s] = 0
             for s in parser.bintab:
                 self.bytesmap[s] = 0
-            self.symbols.update(parser.symtab)
-            if parser.objects:
-                self._pending.append((filename, parser))
+            for obj in parser.objects:
+                builder = block_builder(obj, self.macro)
+                for s in builder.strtab:
+                    self.strmap[s] = 0
+                for s in builder.strtab_weak:
+                    self.strmap_weak[s] = 0
+                for s in builder.strtab_long:
+                    self.strmap_long[s] = 0
+                builder.dumpfile(self.output)
 
     def scandir(self, srcpath):
         for item in os.listdir(srcpath):

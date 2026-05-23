@@ -17,15 +17,6 @@ class object_block:
 class coc_parser:
     """Parser for Berry"""
 
-    # Berry object symbols declared in solidified `.h` files. Used by the
-    # builder to drop `@const_object_info_*` entries that reference a symbol
-    # which is absent from the current build (e.g. a class whose `.be` source
-    # was gated out by `#if FLAG`, so solidify produced an empty header).
-    _SYMBOL_DECL_RE = re.compile(
-        r"extern\s+const\s+(?:bclass|bntvmodule|bcommomod|bvalue|bfunction)\s+"
-        r"(be_(?:class|module|native_module|const|func)_[A-Za-z0-9_]+)\s*;"
-    )
-
     def __init__(self, text):
         """Parse text file"""
         self.objects = []
@@ -33,7 +24,6 @@ class coc_parser:
         self.strtab_weak = set()
         self.strtab_long = set()
         self.bintab = set()
-        self.symtab = set()
         self.text = text
         self.parsers = {
             "@const_object_info_begin": self.parse_object,
@@ -46,11 +36,6 @@ class coc_parser:
             "be_nested_str_long(": self.parse_string_long,
             "be_str_weak(": self.parse_string_weak,
         }
-
-        # Collect Berry object symbols (extern forward declarations) across
-        # the whole file before the marker-based pass below.
-        for m in self._SYMBOL_DECL_RE.finditer(self.text):
-            self.symtab.add(m.group(1))
 
         while len(self.text) > 0:
             pattern = "|".join(self.parsers.keys())
