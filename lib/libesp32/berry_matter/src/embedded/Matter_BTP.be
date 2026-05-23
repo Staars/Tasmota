@@ -1,7 +1,7 @@
 #
 # Matter_BTP.be - implements the Matter Bluetooth Transport Protocol (BTP)
 #
-# Copyright (C) 2023  Stephan Hadinger & Theo Arends
+# Copyright (C) 2026 Stephan Hadinger, Christian Baars & Theo Arends
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by

@@ -1,7 +1,7 @@
 #
 # Matter_zz_Device_BLE.be - generic Matter-over-BLE commissionee
 #
-# Copyright (C) 2023  Stephan Hadinger & Theo Arends
+# Copyright (C) 2026  Stephan Hadinger, Christian Baars & Theo Arends
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -92,7 +92,7 @@ class Matter_Device_BLE : Matter_Device
         self.cbuf = bytes(-255)
         matter.profiler = matter.Profiler()
         var cbp = cb.gen_cb(/e,o,u,h->self.cb(e,o,u,h))
-        BLE.serv_cb(cbp, self.cbuf)
+        BLE.conn_cb(cbp, self.cbuf)
         self.current_func = /->self.init_C1()
         BLE.set_svc("FFF6")
         self.btp = matter.BTP(self)
