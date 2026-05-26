@@ -95,7 +95,7 @@
 #define WIFI_SCAN_AT_RESTART   false             // [SetOption56] Scan Wi-Fi network at restart for configured AP's
 #define WIFI_SCAN_REGULARLY    true              // [SetOption57] Scan Wi-Fi network every 44 minutes for configured AP's
 #define WIFI_NO_SLEEP          false             // [SetOption127] Sets Wifi in no-sleep mode which improves responsiveness on some routers
-#define WIFI_DEFAULT_HOSTNAME  "%s-%04d"         // [Hostname] Expands to <MQTT_TOPIC>-<last 4 decimal chars of MAC address>
+#define WIFI_DEFAULT_HOSTNAME  "%s-%04d"         // [Hostname] Expands to <MQTT_TOPIC>-<last 4 decimal chars of chip ID>
 
 // -- Syslog --------------------------------------
 #define SYS_LOG_HOST           ""                // [LogHost] (Linux) syslog host
@@ -1145,7 +1145,8 @@
 //#define USE_HRE                                  // Add support for Badger HR-E Water Meter (+1k4 code)
 //#define USE_A4988_STEPPER                        // Add support for A4988/DRV8825 stepper-motor-driver-circuit (+10k5 code)
 //#define USE_VID6608                              // Add support for VID6608 Automotive analog gauge driver (+0k7 code)
-//  #define VID6608_RESET_ON_INIT  true            // Reset VID6608 on init (default: true), change if you control this manually
+//  #define VID6608_RESET_ON_INIT  1               // Reset VID6608 on init (default: true), change if you control this manually
+//  #define VID6608_RMT            0               // Use hardware RMT driver, ESP32 only. Warning: SoC have limited RMT count, amy conflict with others (WS2812b, IR and similar)
 
 //#define USE_PROMETHEUS                           // Add support for https://prometheus.io/ metrics exporting over HTTP /metrics endpoint
 
@@ -1353,6 +1354,7 @@
 //#define DEBUG_TASMOTA_DRIVER                     // Enable driver debug messages
 //#define DEBUG_TASMOTA_SENSOR                     // Enable sensor debug messages
 //#define USE_DEBUG_DRIVER                         // Use xdrv_99_debug.ino providing commands CpuChk, CfgXor, CfgDump, CfgPeek and CfgPoke
+//#define USE_ESP8266_DEBUG_HEAP                   // Add heap fragmentation display support. Needs build_flags -DUMM_STATS_FULL and -DUMM_INLINE_METRICS too (+2k5 code)
 
 /*********************************************************************************************\
  * Profiling features
