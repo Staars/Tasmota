@@ -276,7 +276,6 @@ extern const bclass be_class_Matter_TLV;   // need to declare it upfront because
 #if USE_MI_EXT_GUI
 #include "solidify/solidified_Matter_BTP.h"
 #include "solidify/solidified_Matter_zz_Device_BLE.h"
-// #warning ________________
 #endif //USE_MI_EXT_GUI
 #include "solidify/solidified_Matter_zz_Device.h"
 
