@@ -14,7 +14,7 @@ Implement Matter over Thread on Tasmota (ESP32-C6): commissioning (PASE + CASE),
 │         │                                      │
 │         ▼                                      │
 │  Matter_SRP_Client.be                          │
-│    └─ Key generation & persistence             │
+│    └─ Key set via set_key() from host          │
 │    └─ Server discovery (OT.netdata_services)   │
 │    └─ DNS UPDATE builder + SIG(0)              │
 │    └─ ECDSA signing + low-S normalization      │
@@ -39,7 +39,7 @@ Implement Matter over Thread on Tasmota (ESP32-C6): commissioning (PASE + CASE),
 
 - **SRP key is separate from NOC** (RFC 9665 §3.2.5.1). Apple mDNSResponder does not cross-check against NOC.
 - **Low-S normalization is pure Berry** (byte-comparison of big-endian integers, post-processing ECDSA output).
-- **Key persistence**: `/srp_key.bin` (LittleFS) — generated fresh in Berry, NOT NOC, NOT `/ot_settings.bin`.
+- **SRP key is a compile-time constant** in `Matter_Thread_Device.be:kSrpPriv/kSrpPub` (secp256r1 `bytes("hex")`), passed via `set_key()` — NOT generated at runtime, NOT persisted.
 - **Hostname**: derived from Tasmota EUI64 (deterministic, not random).
 - **OT types are hidden from the .ino file** — only BearThread C++ files include `<openthread/*>` headers.
 - **All SRP atomic in Berry** — no hybrid C/Berry crypto.
@@ -49,7 +49,7 @@ Implement Matter over Thread on Tasmota (ESP32-C6): commissioning (PASE + CASE),
 ### Core Berry implementation
 | File | Role |
 |------|------|
-| `lib/libesp32/berry_matter/src/embedded/Matter_SRP_Client.be` | Full SRP client: keygen, signing, DNS UPDATE builder, SIG(0), state machine, server discovery |
+| `lib/libesp32/berry_matter/src/embedded/Matter_SRP_Client.be` | Full SRP client: set_key, signing, DNS UPDATE builder, SIG(0), state machine, server discovery |
 | `Matter_Thread_Device.be` | Orchestrator — creates `self.srp = matter.SRP_Client()` in `init()` |
 | `lib/libesp32/berry_tasmota/src/be_OT_lib.c` | OT module registration (20 entries including CoAP, netdata_services, coex_prefer_thread) |
 | `lib/libesp32/berry/generate/be_fixed_OT.h` | Auto-generated from be_OT_lib.c — do not hand-edit |

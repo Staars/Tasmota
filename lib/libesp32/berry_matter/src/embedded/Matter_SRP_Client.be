@@ -355,41 +355,83 @@ class Matter_SRP_Client
     # Server discovery
     #########################################################################
     def _pick_server()
+        # OT.netdata_services() returns human-readable descriptor strings, e.g.
+        #   "id=2 ent=44970 rloc=0xfc12 stable=1 kind=SRP-unicast sd=5D \
+        #    svr=FD1D... [fd1d:bc81:cb5e:0:9c2c:bb11:ffe1:2398]:64970"
+        #   "id=1 ent=44970 rloc=0xfc11 stable=1 kind=SRP-anycast sd=5C09 \
+        #    svr= seq=9"
+        # The unicast entry carries an explicit "[addr]:port" tail. The anycast
+        # entry carries only the server RLOC16, from which we derive the ALOC
+        # "<mesh-local-prefix>:0:ff:fe00:<rloc16>".
         import string
         try
             import OT
             var services = OT.netdata_services()
-            if services != nil
-                var i = 0
-                while i < size(services)
-                    var s = services[i]
-                    # lines look like: "SRP-unicast fd1d:...:0:ff:fe00:fcXX" or
-                    # "SRP-server fd1d:...:0:ff:fe00:fc11" (anycast ALOC)
-                    # or "SRP fd1d:...:0:ff:fe00:fc11"
-                    if type(s) == "string" && size(s) > 0
-                        if self.use_unicast
-                            if string.find(s, "SRP-unicast") >= 0
-                                var parts = string.split(s, " ", 1)
-                                if size(parts) >= 2
-                                    self.server_addr = parts[1]
-                                    return parts[1]
-                                end
-                            end
-                        else
-                            if string.find(s, "SRP") >= 0 && string.find(s, "unicast") < 0
-                                var parts = string.split(s, " ", 1)
-                                if size(parts) >= 2
-                                    self.server_addr = parts[1]
-                                    return parts[1]
-                                end
-                            end
+            if services == nil
+                return nil
+            end
+            var anycast_rloc = nil
+            var i = 0
+            while i < size(services)
+                var s = services[i]
+                i += 1
+                if type(s) != "string" || size(s) == 0
+                    continue
+                end
+                # Prefer unicast: extract the explicit "[addr]:port" tail.
+                if string.find(s, "SRP-unicast") >= 0
+                    var lb = string.find(s, "[")
+                    var rb = string.find(s, "]:")
+                    if lb >= 0 && rb > lb
+                        var addr = s[lb + 1 .. rb - 1]
+                        var port = int(s[rb + 2 .. size(s) - 1])
+                        if size(addr) > 0 && port > 0
+                            self.server_addr = addr
+                            self.server_port = port
+                            return addr
                         end
                     end
-                    i += 1
+                # Remember the first anycast entry as a fallback.
+                elif string.find(s, "SRP-anycast") >= 0 && anycast_rloc == nil
+                    var rp = string.find(s, "rloc=0x")
+                    if rp >= 0
+                        anycast_rloc = s[rp + 7 .. rp + 10]   # 4 hex chars
+                    end
+                end
+            end
+            # No unicast entry: build the anycast ALOC from the RLOC16.
+            if anycast_rloc != nil
+                var aloc = self._aloc_from_rloc(anycast_rloc)
+                if aloc != nil
+                    self.server_addr = aloc
+                    self.server_port = 53
+                    return aloc
                 end
             end
         except .. as e, m
             log(format("MTR: SRP server pick FAILED: %s %s", str(e), str(m)), 2)
+        end
+        return nil
+    end
+
+    # Build an anycast ALOC "<mesh-local-prefix>:0:ff:fe00:<rloc16>" by reusing
+    # the mesh-local prefix from one of our own RLOC-based addresses (those
+    # contain the marker ":0:ff:fe00:").
+    def _aloc_from_rloc(rloc16)
+        import string
+        import OT
+        var a = OT.get_ipaddr()
+        if a == nil
+            return nil
+        end
+        var i = 0
+        while i < size(a)
+            var s = a[i]
+            i += 1
+            var idx = string.find(s, ":0:ff:fe00:")
+            if idx >= 0
+                return s[0 .. idx - 1] + ":0:ff:fe00:" + rloc16
+            end
         end
         return nil
     end
@@ -630,7 +672,7 @@ class Matter_SRP_Client
         if size(a) != n
             return nil
         end
-        var out = bytes(n)
+        var out = bytes(-n)
         var borrow = 0
         var i = n - 1
         while i >= 0
@@ -658,8 +700,8 @@ class Matter_SRP_Client
         if size(sig_raw) != 64
             return sig_raw
         end
-        var r = bytes(32)
-        var s = bytes(32)
+        var r = bytes(-32)
+        var s = bytes(-32)
         var i = 0
         while i < 32
             r[i] = sig_raw[i]
@@ -669,7 +711,7 @@ class Matter_SRP_Client
         if self._is_high_s(s)
             s = self._sub_be(self.kN, s)
         end
-        var out = bytes(64)
+        var out = bytes(-64)
         i = 0
         while i < 32
             out[i] = r[i]
@@ -731,8 +773,8 @@ class Matter_SRP_Client
         if size(sig_raw) != 64
             return nil
         end
-        var r = bytes(32)
-        var s = bytes(32)
+        var r = bytes(-32)
+        var s = bytes(-32)
         var i = 0
         while i < 32
             r[i] = sig_raw[i]
@@ -1216,7 +1258,9 @@ class Matter_SRP_Client
 
     def _ipv6_string_to_bytes(s)
         # Parse "XXXX:XXXX:XXXX:XXXX:XXXX:XXXX:XXXX:XXXX" to 16 bytes.
-        var out = bytes(16)
+        # NOTE: bytes(-16) creates a fixed, zero-filled 16-byte buffer.
+        # bytes(16) would only RESERVE 16 bytes (len stays 0) and indexing fails.
+        var out = bytes(-16)
         # Strip optional "[" and "]"
         if size(s) > 0 && s[0] == '['
             s = s[1 .. size(s) - 1]
@@ -1225,20 +1269,8 @@ class Matter_SRP_Client
             s = s[0 .. size(s) - 2]
         end
         # Handle "::" (zero compression)
-        var parts = []
-        var i = 0
-        var start = 0
-        while i <= size(s)
-            if i == size(s) || s[i] == ':'
-                if i > start
-                    parts.push(s[start .. i - 1])
-                else
-                    parts.push("")
-                end
-                start = i + 1
-            end
-            i += 1
-        end
+        import string
+        var parts = string.split(s, ":")
         # Collapse "::"
         var empty_idx = -1
         var j = 0
@@ -1275,7 +1307,9 @@ class Matter_SRP_Client
         var b = 0
         var p = 0
         while p < 8
-            var v = int(addr_parts[p], 16)
+            # Berry's int() ignores a base argument; prepend "0x" so the
+            # string is parsed as hexadecimal (int("0x830b") -> 33547).
+            var v = int("0x" + addr_parts[p])
             out[b]     = (v >> 8) & 0xFF
             out[b + 1] = v & 0xFF
             b += 2
