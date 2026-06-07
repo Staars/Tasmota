@@ -30,7 +30,6 @@
 #include <openthread/dataset.h>
 #include <openthread/ip6.h>
 #include <openthread/thread.h>
-#include <openthread/srp_client.h>
 #include <openthread/netdata.h>
 #include <openthread/link.h>
 #include <openthread/udp.h>
@@ -49,7 +48,12 @@
  *
  * Provides: OT.init(), OT.start(), OT.stop(), OT.set_dataset(), OT.get_dataset(),
  *           OT.get_role(), OT.get_ipaddr(), OT.get_eui64(), OT.state_cb(),
- *           OT.srp_host(), OT.srp_service(), OT.srp_remove(), OT.factory_reset()
+ *           OT.factory_reset(), OT.netdata_services(), OT.set_log_level(),
+ *           OT.udp_*(), OT.coap_send_request(), OT.coap_poll_response()
+ *
+ * Note: SRP client functions are NOT in this file. The SRP client lives in Berry at
+ *       lib/libesp32/berry_matter/src/embedded/Matter_SRP_Client.be and uses the
+ *       OT.coap_*() wrappers for transport.
 \*********************************************************************************************/
 
 // ---- UDP receive queue ----
@@ -74,9 +78,6 @@ static struct {
   otUdpSocket   udp_socket;
   QueueHandle_t udp_rx_queue = nullptr;
   bool          udp_open = false;
-  // SRP client state
-  bool          srp_callback_set = false;
-  char          srp_hostname[32] = {0};   // last registered SRP hostname (empty if none)
   // Thread state-change pending (latest role) - drained from Berry main task via OT.poll_state()
   // Cross-task callback into Berry VM is unsafe; we only stash the latest role here.
   volatile int32_t state_pending_role = -1;   // -1 means "no pending event"
@@ -88,10 +89,6 @@ static struct {
 static void ot_task(void *pvParameters);
 static void ot_state_changed_callback(uint32_t aFlags, void *aContext);
 static void ot_udp_receive_callback(void *aContext, void *aMessage, const void *aMessageInfo);
-static void ot_srp_client_callback(otError aError, const otSrpClientHostInfo *aHostInfo,
-                                   const otSrpClientService *aServices,
-                                   const otSrpClientService *aRemovedServices, void *aContext);
-static void ot_srp_autostart_callback(const otSockAddr *aServerSockAddr, void *aContext);
 
 // ---- Helper: lock and get OT instance ----
 // Returns OT instance as void* to avoid otInstance in function signature.
@@ -364,156 +361,6 @@ extern "C" void be_OT_factory_reset(struct bvm *vm) {
   AddLog(LOG_LEVEL_INFO, PSTR("OT : factory reset"));
 }
 
-// ---- SRP Client Functions ----
-
-// ---- SRP client state callback (runs in OT task context) ----
-// Logs SRP server registration progress so we can debug discovery issues.
-static void ot_srp_client_callback(otError aError, const otSrpClientHostInfo *aHostInfo,
-                                   const otSrpClientService *aServices,
-                                   const otSrpClientService *aRemovedServices, void *aContext) {
-  if (aError == OT_ERROR_NONE) {
-    if (aHostInfo) {
-      const char *st = "?";
-      switch (aHostInfo->mState) {
-        case OT_SRP_CLIENT_ITEM_STATE_TO_ADD:      st = "to-add"; break;
-        case OT_SRP_CLIENT_ITEM_STATE_ADDING:      st = "adding"; break;
-        case OT_SRP_CLIENT_ITEM_STATE_TO_REFRESH:  st = "to-refresh"; break;
-        case OT_SRP_CLIENT_ITEM_STATE_REFRESHING:  st = "refreshing"; break;
-        case OT_SRP_CLIENT_ITEM_STATE_TO_REMOVE:   st = "to-remove"; break;
-        case OT_SRP_CLIENT_ITEM_STATE_REMOVING:    st = "removing"; break;
-        case OT_SRP_CLIENT_ITEM_STATE_REGISTERED:  st = "registered"; break;
-        case OT_SRP_CLIENT_ITEM_STATE_REMOVED:     st = "removed"; break;
-        default: break;
-      }
-      AddLog(LOG_LEVEL_INFO, PSTR("OT : SRP host '%s' state=%s"),
-             aHostInfo->mName ? aHostInfo->mName : "?", st);
-    }
-    const otSrpClientService *svc = aServices;
-    while (svc) {
-      const char *st = "?";
-      switch (svc->mState) {
-        case OT_SRP_CLIENT_ITEM_STATE_TO_ADD:      st = "to-add"; break;
-        case OT_SRP_CLIENT_ITEM_STATE_ADDING:      st = "adding"; break;
-        case OT_SRP_CLIENT_ITEM_STATE_TO_REFRESH:  st = "to-refresh"; break;
-        case OT_SRP_CLIENT_ITEM_STATE_REFRESHING:  st = "refreshing"; break;
-        case OT_SRP_CLIENT_ITEM_STATE_TO_REMOVE:   st = "to-remove"; break;
-        case OT_SRP_CLIENT_ITEM_STATE_REMOVING:    st = "removing"; break;
-        case OT_SRP_CLIENT_ITEM_STATE_REGISTERED:  st = "registered"; break;
-        case OT_SRP_CLIENT_ITEM_STATE_REMOVED:     st = "removed"; break;
-        default: break;
-      }
-      AddLog(LOG_LEVEL_INFO, PSTR("OT : SRP svc '%s.%s' state=%s"),
-             svc->mInstanceName, svc->mName, st);
-      svc = svc->mNext;
-    }
-  } else {
-    AddLog(LOG_LEVEL_INFO, PSTR("OT : SRP callback error=%d"), aError);
-  }
-}
-
-// ---- SRP autostart callback (runs in OT task context) ----
-// Fires when the SRP client autostarts after discovering a server, or stops.
-static void ot_srp_autostart_callback(const otSockAddr *aServerSockAddr, void *aContext) {
-  if (aServerSockAddr) {
-    char addr_str[OT_IP6_ADDRESS_STRING_SIZE];
-    otIp6AddressToString(&aServerSockAddr->mAddress, addr_str, sizeof(addr_str));
-    AddLog(LOG_LEVEL_INFO, PSTR("OT : SRP autostart, server [%s]:%d"),
-           addr_str, aServerSockAddr->mPort);
-  } else {
-    AddLog(LOG_LEVEL_INFO, PSTR("OT : SRP autostart stopped (no server)"));
-  }
-}
-
-// OT.srp_host(hostname, addrs) - set SRP client hostname and addresses
-// Idempotent: if hostname is already registered with the same name, this is a no-op.
-extern "C" int be_OT_srp_host(bvm *vm) {
-  int argc = be_top(vm);
-  if (argc < 1 || !be_isstring(vm, 1)) {
-    be_raise(vm, kTypeError, nullptr);
-  }
-
-  const char *hostname = be_tostring(vm, 1);
-
-  otInstance *instance = (otInstance*)ot_lock_and_get();
-  if (!instance) {
-    be_raisef(vm, "ot_error", "OT: not initialized");
-    be_return_nil(vm);
-  }
-
-  // Idempotency: if we already registered this exact hostname, skip OT calls.
-  // otSrpClientSetHostName returns OT_ERROR_INVALID_STATE once the host is in
-  // a non-removable state, so calling it again would error out.
-  if (OT_State.srp_hostname[0] != 0 && strcmp(OT_State.srp_hostname, hostname) == 0) {
-    ot_unlock();
-    AddLog(LOG_LEVEL_DEBUG, PSTR("OT : SRP hostname '%s' already set, skipping"), hostname);
-    be_return_nil(vm);
-  }
-
-  // Register SRP client state callback once so we can observe registration progress.
-  if (!OT_State.srp_callback_set) {
-    otSrpClientSetCallback(instance, ot_srp_client_callback, nullptr);
-    OT_State.srp_callback_set = true;
-  }
-
-  // Set hostname
-  otError error = otSrpClientSetHostName(instance, hostname);
-  if (error != OT_ERROR_NONE && error != OT_ERROR_ALREADY) {
-    ot_unlock();
-    be_raisef(vm, "ot_error", "OT: srp_host set hostname failed: %d", error);
-    be_return_nil(vm);
-  }
-
-  // Auto-set host addresses from Thread interface addresses
-  error = otSrpClientEnableAutoHostAddress(instance);
-  if (error != OT_ERROR_NONE && error != OT_ERROR_ALREADY) {
-    AddLog(LOG_LEVEL_DEBUG, PSTR("OT : SRP auto host address failed: %d"), error);
-  }
-
-  // Enable auto-start (with autostart callback so we can see when SRP server is found)
-  otSrpClientEnableAutoStartMode(instance, ot_srp_autostart_callback, nullptr);
-
-  // Remember the hostname for idempotency
-  strncpy(OT_State.srp_hostname, hostname, sizeof(OT_State.srp_hostname) - 1);
-  OT_State.srp_hostname[sizeof(OT_State.srp_hostname) - 1] = 0;
-
-  ot_unlock();
-
-  AddLog(LOG_LEVEL_INFO, PSTR("OT : SRP hostname set to '%s'"), hostname);
-  be_return_nil(vm);
-}
-
-// OT.srp_running() - returns true if the SRP client is currently running
-extern "C" int be_OT_srp_running(bvm *vm) {
-  if (!OT_State.initialized) {
-    be_pushbool(vm, false);
-    be_return(vm);
-  }
-  bt_lock_acquire(portMAX_DELAY);
-  otInstance *instance = bt_get_instance();
-  bool running = otSrpClientIsRunning(instance);
-  bt_lock_release();
-  be_pushbool(vm, running);
-  be_return(vm);
-}
-
-// OT.srp_server() - returns the SRP server address string the autostart picked,
-// or empty string if no server has been discovered yet. Useful to debug
-// OT_ERROR_RESPONSE_TIMEOUT (28) on otSrpClient updates.
-extern "C" const char* be_OT_srp_server(void) {
-  static char srv_str[OT_IP6_ADDRESS_STRING_SIZE + 8];
-  srv_str[0] = 0;
-  if (!OT_State.initialized) return "";
-  bt_lock_acquire(portMAX_DELAY);
-  otInstance *instance = bt_get_instance();
-  const otSockAddr *srv = otSrpClientGetServerAddress(instance);
-  if (srv && !otIp6IsAddressUnspecified(&srv->mAddress)) {
-    char addr_str[OT_IP6_ADDRESS_STRING_SIZE];
-    otIp6AddressToString(&srv->mAddress, addr_str, sizeof(addr_str));
-    snprintf(srv_str, sizeof(srv_str), "[%s]:%d", addr_str, srv->mPort);
-  }
-  bt_lock_release();
-  return srv_str;
-}
 
 // OT.set_log_level(level) - set OpenThread runtime log level.
 // Levels per <openthread/logging.h>:
@@ -624,287 +471,152 @@ extern "C" int be_OT_netdata_services(bvm *vm) {
   be_return(vm);
 }
 
-// OT.srp_use_unicast() - look for a unicast SRP server entry in Thread
-// Network Data and force the SRP client to use it instead of whatever
-// (typically anycast) the autostart logic picked. Returns true if a
-// unicast entry was found and applied; false otherwise.
+// OT.coex_prefer_thread(prefer) - set the 802.15.4 / Wi-Fi coexistence preference.
 //
-// Background: the OpenThread SRP client autostart mode is supposed to
-// prefer unicast over anycast, but on real Apple Border Router meshes we
-// observe it locking onto the anycast ALOC `:0:ff:fe00:fc1X` and getting
-// OT_ERROR_RESPONSE_TIMEOUT (28) forever. When netdata also publishes a
-// real unicast SRP server, switching to it usually unblocks registration.
-extern "C" int be_OT_srp_use_unicast(bvm *vm) {
+// ESP32-C6 has built-in coexistence between Wi-Fi, BLE, and 802.15.4 (used by
+// Thread). When Thread is joining/operating on the same chip as Wi-Fi, the
+// radio scheduler may bias toward Wi-Fi; that can starve Thread retransmissions
+// and cause CASE timeouts / SRP registration timeouts. Calling this with true
+// nudges the scheduler to give 802.15.4 more airtime.
+//
+// Args:
+//   prefer : true → prefer 802.15.4 over Wi-Fi
+//            false → balance (default; let scheduler decide)
+//
+// Returns true on success.
+extern "C" int be_OT_coex_prefer_thread(bvm *vm) {
+  int argc = be_top(vm);
+  if (argc < 1) {
+    be_raise(vm, kTypeError, "OT: coex_prefer_thread needs 1 arg (bool)");
+  }
+  bool prefer_thread = be_tobool(vm, 1);
+
+  // The ESP-IDF coexist API exposes esp_coex_preference_set(esp_coex_prefer_t)
+  // but the legacy symbol coex_preference_set() is what libcoexist.a exports.
+  // Both take the same enum: 0=WIFI, 1=BT (groups 802.15.4), 2=BALANCE.
+  int prefer = prefer_thread ? 1 : 2;
+
+  // The legacy coex_preference_set() comes from libcoexist.a in the Arduino
+  // ESP32 core. There is no public header in the arduino-libs esp32c6 include
+  // tree, so we declare it locally to avoid pulling private headers.
+  extern esp_err_t coex_preference_set(int prefer);
+  esp_err_t err = coex_preference_set(prefer);
+
+  if (err == ESP_OK) {
+    AddLog(LOG_LEVEL_INFO, PSTR("OT : coexistence preference set to %s"),
+           prefer_thread ? "thread" : "balance");
+  } else {
+    AddLog(LOG_LEVEL_INFO, PSTR("OT : coex_prefer_thread failed: %d"), err);
+  }
+  be_pushbool(vm, err == ESP_OK);
+  be_return(vm);
+}
+
+// ---- CoAP client (wraps bt_coap_*) ----
+//
+// The OpenThread CoAP API (otCoapSendRequest, otMessage, otMessageInfo) is
+// declared with OT types that don't reliably resolve in the merged .ino.cpp
+// (the Arduino prototype generator places includes before the function
+// signatures, so OT types are sometimes invisible to the IDE/build).
+// Instead, all OT CoAP state lives inside BearThread as a hidden queue; the
+// bt_coap_*() wrapper functions in bt_platform.h take only C types and a
+// heap-copied payload. The be_OT_coap_*() functions below are thin Berry
+// shims over those wrappers. Berry-side Matter_SRP_Client.be uses
+// OT.coap_send_request(method, uri, cfmt, payload, addr, port, userdata)
+// to build CoAP POSTs for SRP UPDATE / DNS-SD messages.
+
+// OT.coap_send_request(method, uri, content_format, payload, addr, port, userdata)
+//
+//   method         : "GET" | "POST" | "PUT" | "DELETE"
+//                    (currently only POST is used by the Berry-side SRP client;
+//                     other methods are accepted but routed as POST in the
+//                     BearThread wrapper — extend bt_coap.cpp when needed.)
+//   uri            : CoAP URI-Path (e.g. "a/srp")
+//   content_format : 0 to omit, 42 for application/dns-message
+//   payload        : raw bytes (may be nil/empty)
+//   addr           : destination IPv6 string (e.g. "fd1d:bc81:cb5e::1")
+//   port           : uint destination UDP port
+//   userdata       : int opaque handle returned in the response (correlation id)
+//
+// Returns true on enqueue success, false on error.
+extern "C" int be_OT_coap_send_request(bvm *vm) {
+  int argc = be_top(vm);
+  if (argc < 7
+      || !be_isstring(vm, 1) || !be_isstring(vm, 2) || !be_isint(vm, 3)
+      || !be_isstring(vm, 5) || !be_isint(vm, 6) || !be_isint(vm, 7)) {
+    be_raise(vm, kTypeError, "OT: coap_send_request needs (method, uri, cfmt, payload, addr, port, userdata)");
+  }
+  const char *method_str = be_tostring(vm, 1);
+  (void)method_str; // currently informational; bt_coap_send_request is POST-only
+  const char *uri        = be_tostring(vm, 2);
+  int cfmt               = be_toint(vm, 3);
+  // arg 4 = payload (bytes-or-nil)
+  size_t payload_len = 0;
+  const uint8_t *payload = nullptr;
+  if (argc >= 4 && be_isbytes(vm, 4)) {
+    payload = (const uint8_t *)be_tobytes(vm, 4, &payload_len);
+  }
+  const char *addr_str  = be_tostring(vm, 5);
+  uint16_t    port      = (uint16_t)be_toint(vm, 6);
+  uint32_t    userdata   = (uint32_t)be_toint(vm, 7);
+
   if (!OT_State.initialized) {
     be_pushbool(vm, false);
     be_return(vm);
   }
-  bt_lock_acquire(portMAX_DELAY);
-  otInstance *instance = bt_get_instance();
 
-  otNetworkDataIterator iter = OT_NETWORK_DATA_ITERATOR_INIT;
-  otServiceConfig svc;
-  bool found = false;
-  otSockAddr target;
-  memset(&target, 0, sizeof(target));
-  while (otNetDataGetNextService(instance, &iter, &svc) == OT_ERROR_NONE) {
-    if (svc.mEnterpriseNumber != 44970) continue;
-    if (svc.mServiceDataLength < 1) continue;
-    if (svc.mServiceData[0] != 0x5D) continue;          // not unicast SRP
-    if (svc.mServerConfig.mServerDataLength < 18) continue;
-    memcpy(target.mAddress.mFields.m8, svc.mServerConfig.mServerData, 16);
-    target.mPort = (uint16_t)svc.mServerConfig.mServerData[16] << 8 |
-                   (uint16_t)svc.mServerConfig.mServerData[17];
-    found = true;
-    break;
-  }
-  if (!found) {
-    bt_lock_release();
-    AddLog(LOG_LEVEL_DEBUG, PSTR("OT : no unicast SRP server in netdata"));
-    be_pushbool(vm, false);
-    be_return(vm);
-  }
-
-  // Already on this server? No-op.
-  const otSockAddr *cur = otSrpClientGetServerAddress(instance);
-  if (cur && otIp6IsAddressEqual(&cur->mAddress, &target.mAddress) &&
-      cur->mPort == target.mPort && otSrpClientIsRunning(instance)) {
-    bt_lock_release();
-    AddLog(LOG_LEVEL_DEBUG, PSTR("OT : SRP already on unicast server"));
-    be_pushbool(vm, true);
-    be_return(vm);
-  }
-
-  // Switch: disable autostart, stop, restart with target
-  otSrpClientDisableAutoStartMode(instance);
-  if (otSrpClientIsRunning(instance)) {
-    otSrpClientStop(instance);
-  }
-  otError err = otSrpClientStart(instance, &target);
-  bt_lock_release();
-
-  char addr_str[OT_IP6_ADDRESS_STRING_SIZE];
-  otIp6AddressToString(&target.mAddress, addr_str, sizeof(addr_str));
-  if (err == OT_ERROR_NONE) {
-    AddLog(LOG_LEVEL_INFO, PSTR("OT : SRP forced unicast [%s]:%u"),
-           addr_str, target.mPort);
-    be_pushbool(vm, true);
-  } else {
-    AddLog(LOG_LEVEL_INFO, PSTR("OT : SRP force unicast failed: %d ([%s]:%u)"),
-           err, addr_str, target.mPort);
-    be_pushbool(vm, false);
-  }
+  esp_err_t rc = bt_coap_send_request(userdata, uri, cfmt,
+                                      payload, payload_len,
+                                      addr_str, port);
+  be_pushbool(vm, rc == ESP_OK);
   be_return(vm);
 }
 
-// OT.srp_state() - returns SRP host state as string
-extern "C" const char* be_OT_srp_state(void) {
-  if (!OT_State.initialized) return "uninitialized";
-  bt_lock_acquire(portMAX_DELAY);
-  otInstance *instance = bt_get_instance();
-  if (!otSrpClientIsRunning(instance)) {
-    bt_lock_release();
-    return "stopped";
+// OT.coap_poll_response() -> [userdata, err, code, addr, port, payload_bytes] or nil
+//
+// Drains one pending CoAP response from the BearThread-internal queue. Returns
+// nil if no response is waiting. Otherwise returns a 6-element list:
+//   [0] userdata int  (the handle passed to coap_send_request)
+//   [1] err    int   (otError; 0 = OT_ERROR_NONE, 28 = OT_ERROR_RESPONSE_TIMEOUT, ...)
+//   [2] code   int   (raw CoAP response code, e.g. 0x84 = 4.04 Not Found)
+//   [3] addr   str   (source IPv6 of the response, "[<ipv6>]")
+//   [4] port   int   (source UDP port)
+//   [5] payload bytes
+extern "C" int be_OT_coap_poll_response(bvm *vm) {
+  bt_coap_response_t resp;
+  if (!bt_coap_poll_response(&resp)) {
+    be_return_nil(vm);
   }
-  const otSrpClientHostInfo *info = otSrpClientGetHostInfo(instance);
-  bt_lock_release();
-  if (!info) return "running";
-  switch (info->mState) {
-    case OT_SRP_CLIENT_ITEM_STATE_TO_ADD:      return "to-add";
-    case OT_SRP_CLIENT_ITEM_STATE_ADDING:      return "adding";
-    case OT_SRP_CLIENT_ITEM_STATE_TO_REFRESH:  return "to-refresh";
-    case OT_SRP_CLIENT_ITEM_STATE_REFRESHING:  return "refreshing";
-    case OT_SRP_CLIENT_ITEM_STATE_TO_REMOVE:   return "to-remove";
-    case OT_SRP_CLIENT_ITEM_STATE_REMOVING:    return "removing";
-    case OT_SRP_CLIENT_ITEM_STATE_REGISTERED:  return "registered";
-    case OT_SRP_CLIENT_ITEM_STATE_REMOVED:     return "removed";
-    default: return "unknown";
-  }
+  be_newobject(vm, "list");
+  // [0] userdata
+  be_pushint(vm, (int32_t)resp.userdata);
+  be_data_push(vm, -2);
+  be_pop(vm, 1);
+  // [1] err
+  be_pushint(vm, (int32_t)resp.err);
+  be_data_push(vm, -2);
+  be_pop(vm, 1);
+  // [2] code
+  be_pushint(vm, (int32_t)resp.code);
+  be_data_push(vm, -2);
+  be_pop(vm, 1);
+  // [3] addr
+  be_pushstring(vm, resp.addr);
+  be_data_push(vm, -2);
+  be_pop(vm, 1);
+  // [4] port
+  be_pushint(vm, (int32_t)resp.port);
+  be_data_push(vm, -2);
+  be_pop(vm, 1);
+  // [5] payload bytes
+  be_pushbytes(vm, resp.payload, resp.payload_len);
+  be_data_push(vm, -2);
+  be_pop(vm, 1);
+
+  be_pop(vm, 1);  // pop list internal
+  be_return(vm);
 }
 
-// OT.srp_service(instance_name, service_type, port, subtypes_list, txt_map)
-// e.g. OT.srp_service("ABCDEF123456", "_matterc._udp", 5540, ["_S3", "_L840"], {"D":"840","VP":"FFF1+8000"})
-extern "C" int be_OT_srp_service(bvm *vm) {
-  int argc = be_top(vm);
-  if (argc < 3 || !be_isstring(vm, 1) || !be_isstring(vm, 2) || !be_isint(vm, 3)) {
-    be_raise(vm, kTypeError, nullptr);
-  }
-
-  const char *inst_name = be_tostring(vm, 1);
-  const char *svc_type  = be_tostring(vm, 2);
-  uint16_t    port      = (uint16_t)be_toint(vm, 3);
-
-  otInstance *instance = (otInstance*)ot_lock_and_get();
-  if (!instance) {
-    be_raisef(vm, "ot_error", "OT: not initialized");
-    be_return_nil(vm);
-  }
-
-  // Allocate service struct (persistent, leaked intentionally - OT takes ownership)
-  otSrpClientService *service = (otSrpClientService *)calloc(1, sizeof(otSrpClientService));
-  if (!service) {
-    ot_unlock();
-    be_raise(vm, "memory_error", "OT: out of memory");
-    be_return_nil(vm);
-  }
-
-  service->mInstanceName = strdup(inst_name);
-  service->mName = strdup(svc_type);
-  service->mPort = port;
-
-  // Parse subtypes list (arg 4): Berry list of strings → NULL-terminated C array
-  service->mSubTypeLabels = nullptr;
-  if (argc >= 4 && be_islistinstance(vm, 4)) {
-    // Get the internal list via .p member
-    be_getmember(vm, 4, ".p");
-    int count = be_data_size(vm, -1);
-    if (count > 0) {
-      const char **labels = (const char **)calloc(count + 1, sizeof(const char *));
-      if (labels) {
-        for (int i = 0; i < count; i++) {
-          be_pushint(vm, i);          // push index onto stack
-          be_getindex(vm, -2);        // reads key at -1, pushes value; list .p is at -2
-          // stack: ... .p_list index value
-          if (be_isstring(vm, -1)) {
-            labels[i] = strdup(be_tostring(vm, -1));
-          } else {
-            labels[i] = strdup("");
-          }
-          be_pop(vm, 2);             // pop index and value
-        }
-        labels[count] = nullptr;      // NULL terminator
-        service->mSubTypeLabels = labels;
-      }
-    }
-    be_pop(vm, 1);                    // pop .p list
-  }
-
-  // Parse TXT entries (arg 5): Berry map {key: value} → otDnsTxtEntry array
-  service->mNumTxtEntries = 0;
-  service->mTxtEntries = nullptr;
-  if (argc >= 5 && be_ismapinstance(vm, 5)) {
-    // Get the internal map via .p member (same pattern as berry_mdns)
-    be_getmember(vm, 5, ".p");
-    int32_t map_len = be_data_size(vm, -1);
-    if (map_len > 0) {
-      otDnsTxtEntry *entries = (otDnsTxtEntry *)calloc(map_len, sizeof(otDnsTxtEntry));
-      if (entries) {
-        int idx = 0;
-        be_pushiter(vm, -1);            // push iterator for the internal map
-        while (be_iter_hasnext(vm, -2) && idx < map_len) {
-          be_iter_next(vm, -2);
-          // stack: ... map iter key value
-          const char *key = be_isstring(vm, -2) ? be_tostring(vm, -2) : "";
-          entries[idx].mKey = strdup(key);
-          // Convert value to string for TXT record
-          if (be_isstring(vm, -1)) {
-            const char *val_str = be_tostring(vm, -1);
-            size_t val_len = strlen(val_str);
-            uint8_t *val_buf = (uint8_t *)malloc(val_len);
-            if (val_buf) {
-              memcpy(val_buf, val_str, val_len);
-              entries[idx].mValue = val_buf;
-              entries[idx].mValueLength = val_len;
-            } else {
-              entries[idx].mValue = nullptr;
-              entries[idx].mValueLength = 0;
-            }
-          } else if (be_isint(vm, -1)) {
-            // Integer values: convert to string representation
-            char num_buf[16];
-            snprintf(num_buf, sizeof(num_buf), "%d", (int)be_toint(vm, -1));
-            size_t val_len = strlen(num_buf);
-            uint8_t *val_buf = (uint8_t *)malloc(val_len);
-            if (val_buf) {
-              memcpy(val_buf, num_buf, val_len);
-              entries[idx].mValue = val_buf;
-              entries[idx].mValueLength = val_len;
-            } else {
-              entries[idx].mValue = nullptr;
-              entries[idx].mValueLength = 0;
-            }
-          } else {
-            entries[idx].mValue = nullptr;
-            entries[idx].mValueLength = 0;
-          }
-          idx++;
-          be_pop(vm, 2);              // pop key and value
-        }
-        be_pop(vm, 1);                // pop iterator
-        service->mNumTxtEntries = idx;
-        service->mTxtEntries = entries;
-      }
-    }
-    be_pop(vm, 1);                    // pop .p map
-  }
-
-  otError error = otSrpClientAddService(instance, service);
-  ot_unlock();
-
-  if (error != OT_ERROR_NONE && error != OT_ERROR_ALREADY) {
-    // Free allocated memory on failure
-    if (service->mSubTypeLabels) {
-      for (int i = 0; service->mSubTypeLabels[i]; i++) free((void*)service->mSubTypeLabels[i]);
-      free((void*)service->mSubTypeLabels);
-    }
-    if (service->mTxtEntries) {
-      for (int i = 0; i < service->mNumTxtEntries; i++) {
-        free((void*)service->mTxtEntries[i].mKey);
-        free((void*)service->mTxtEntries[i].mValue);
-      }
-      free((void*)service->mTxtEntries);
-    }
-    free((void*)service->mInstanceName);
-    free((void*)service->mName);
-    free(service);
-    be_raisef(vm, "ot_error", "OT: srp_service add failed: %d", error);
-    be_return_nil(vm);
-  }
-
-  int sub_count = 0;
-  if (service->mSubTypeLabels) {
-    for (int i = 0; service->mSubTypeLabels[i]; i++) sub_count++;
-  }
-  AddLog(LOG_LEVEL_INFO, PSTR("OT : SRP service '%s' type '%s' port %d txt=%d sub=%d"),
-         inst_name, svc_type, port, service->mNumTxtEntries, sub_count);
-  be_return_nil(vm);
-}
-
-// OT.srp_remove(instance_name, service_type) - remove an SRP service
-extern "C" int be_OT_srp_remove(bvm *vm) {
-  int argc = be_top(vm);
-  if (argc < 2 || !be_isstring(vm, 1) || !be_isstring(vm, 2)) {
-    be_raise(vm, kTypeError, nullptr);
-  }
-
-  const char *inst_name = be_tostring(vm, 1);
-  const char *svc_type  = be_tostring(vm, 2);
-
-  otInstance *instance = (otInstance*)ot_lock_and_get();
-  if (!instance) {
-    be_raisef(vm, "ot_error", "OT: not initialized");
-    be_return_nil(vm);
-  }
-
-  // Find and remove the matching service
-  const otSrpClientService *svc = otSrpClientGetServices(instance);
-  while (svc) {
-    if (strcmp(svc->mInstanceName, inst_name) == 0 && strcmp(svc->mName, svc_type) == 0) {
-      otError error = otSrpClientRemoveService(instance, (otSrpClientService *)svc);
-      ot_unlock();
-      if (error != OT_ERROR_NONE) {
-        be_raisef(vm, "ot_error", "OT: srp_remove failed: %d", error);
-      }
-      AddLog(LOG_LEVEL_INFO, PSTR("OT : SRP service '%s' removed"), inst_name);
-      be_return_nil(vm);
-    }
-    svc = svc->mNext;
-  }
-
-  ot_unlock();
-  AddLog(LOG_LEVEL_DEBUG, PSTR("OT : SRP service '%s' not found"), inst_name);
-  be_return_nil(vm);
-}
 
 // ---- UDP receive callback (runs in OT task context) ----
 static void ot_udp_receive_callback(void *aContext, void *aMessage, const void *aMessageInfo) {
