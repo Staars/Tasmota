@@ -22,9 +22,8 @@
 # This file replaces the previous OpenThread C-side SRP client. BearThread is
 # transport-only now; the actual SRP/DNS/SIG(0) state machine lives here.
 #
-# The C-side only exposes the CoAP transport (see
-# `tasmota/tasmota_xdrv_driver/xdrv_52_3_berry_thread.ino::be_OT_coap_send_request`
-# and `be_OT_coap_poll_response`) plus a few helpers (`OT.netdata_services()`,
+# The C-side exposes UDP transport (OT.udp_open/send/poll/close) plus a few
+# helpers (`OT.netdata_services()`,
 # `OT.get_eui64()`).
 #
 # Wire format references (from OpenThread reference impl):
@@ -85,11 +84,7 @@ class Matter_SRP_Client
     static kOptUpdateLease = 2
 
     # Wire / protocol
-    static kCoapContentFormatDnsMessage = 42
-    static kCoapCodePost = 0x02            # CoAP code = POST (.02)
-    static kCoapCodeChanged = 0x44         # CoAP code = 2.04 Changed
-    static kCoapCodeBadRequest = 0x80      # 4.00
-    static kUdpPayloadSize = 400           # below OT CoAP MTU 1152
+    static kUdpPayloadSize = 400           # below OT MTU 1152
 
     # Leases
     static kDefaultLeaseSec    = 3600      # 1h, typical for Matter
@@ -143,6 +138,7 @@ class Matter_SRP_Client
     var last_response         # "ok" / "timeout" / "error" / "noerror" (RCODE text)
     var last_error_logged     # int ms - throttle error logging
     var started               # bool
+    var udp_open              # bool
 
     #########################################################################
     # Constructor
@@ -165,6 +161,7 @@ class Matter_SRP_Client
         self.last_response = ""
         self.last_error_logged = 0
         self.started = false
+        self.udp_open = false
     end
 
     #########################################################################
@@ -271,7 +268,13 @@ class Matter_SRP_Client
     # Main tick (called from Matter_Thread_Device.every_50ms)
     #########################################################################
     def every_50ms()
-        # Drain any CoAP responses that came in
+        # Close UDP socket if no longer needed
+        if (self.state == self.kStateStopped || self.state == self.kStateRemoved) && self.udp_open
+            import OT
+            OT.udp_close()
+            self.udp_open = false
+        end
+        # Drain any UDP responses that came in
         self._drain_responses()
 
         if self.hostname == nil
@@ -463,15 +466,14 @@ class Matter_SRP_Client
             return
         end
 
-        # Send via CoAP
+        # Send via UDP (DNS UPDATE)
         try
             import OT
-            OT.coap_send_request("POST", "a/srp",
-                                 self.kCoapContentFormatDnsMessage,
-                                 msg,
-                                 self.server_addr,
-                                 self.server_port,
-                                 self.msg_id)
+            if !self.udp_open
+                OT.udp_open(0)
+                self.udp_open = true
+            end
+            OT.udp_send(self.server_addr, self.server_port, msg)
             self.msg_id = (self.msg_id + 1) & self.kMsgIdMax
             self.last_attempt_ms = tasmota.millis()
             if self.state == self.kStateToAdd || self.state == self.kStateToRefresh
@@ -484,38 +486,24 @@ class Matter_SRP_Client
                 end
             end
         except .. as e, m
-            log(format("MTR: SRP coap_send FAILED: %s %s", str(e), str(m)), 2)
+            log(format("MTR: SRP udp_send FAILED: %s %s", str(e), str(m)), 2)
             self._on_failure("send")
         end
     end
 
     def _drain_responses()
+        if !self.udp_open
+            return
+        end
         try
             import OT
             while true
-                var resp = OT.coap_poll_response()
+                var resp = OT.udp_poll()
                 if resp == nil
                     return
                 end
-                var userdata  = resp[0]
-                var payload   = resp[1]
-                var addr      = resp[2]
-                var port      = resp[3]
-                var err       = resp[4]
-
-                if err != 0 || payload == nil
-                    # Timeout or other transport-level error
-                    self._on_failure(format("err=%i", err))
-                    continue
-                end
-                # Parse CoAP response code (first byte of CoAP payload or
-                # code byte — but coap_poll_response returns the raw
-                # CoAP message including CoAP header, not just payload).
-                # We need to peek at byte 1 (code) of the CoAP message.
-                # For now, treat any non-error as success.
-                # The DNS response is inside the CoAP payload, which
-                # follows the CoAP header. We'll trust the CoAP status
-                # (Changed = 2.04) and any RCODE=0 inside.
+                # resp = [payload_bytes, addr_str, port]
+                var payload = resp[0]
                 self._on_success(payload)
             end
         except .. as e, m
@@ -524,63 +512,15 @@ class Matter_SRP_Client
     end
 
     def _on_success(payload)
-        # payload is the full CoAP response message
-        # CoAP header: |Ver:2|T:2|TKL:4|Code:8|MID:16|Token:K|Options...|0xFF|payload|
-        # Code byte is at offset 1.
-        if size(payload) < 4
+        if size(payload) < 12
             self._on_failure("short response")
             return
         end
-        var code_class = (payload[1] >> 5) & 0x07
-        var code_detail = payload[1] & 0x1F
-        if code_class == 2
-            # 2.xx — success. Parse DNS response.
-            self.last_response = format("ok 2.%02i", code_detail)
-            # Find the DNS payload: skip CoAP header (4 bytes) + token (TKL nibble)
-            # TKL is high 4 bits of byte 0
-            var tkl = payload[0] & 0x0F
-            var dns_offset = 4 + tkl
-            # Skip options until 0xFF marker
-            while dns_offset < size(payload)
-                var b = payload[dns_offset]
-                if b == 0xFF
-                    dns_offset += 1
-                    break
-                end
-                var opt_len = b & 0x0F
-                if opt_len == 13
-                    dns_offset += 2
-                    opt_len = payload[dns_offset - 1] + 13
-                elif opt_len == 14
-                    dns_offset += 3
-                    # 14-bit length
-                    opt_len = (payload[dns_offset - 2] & 0x3F) * 256 + payload[dns_offset - 1] + 269
-                end
-                # opt_delta is in the high nibble
-                var opt_delta = (b >> 4) & 0x0F
-                if opt_delta == 13
-                    dns_offset += 1
-                    opt_delta = payload[dns_offset - 1] + 13
-                elif opt_delta == 14
-                    dns_offset += 2
-                    opt_delta = (payload[dns_offset - 2] & 0x3F) * 256 + payload[dns_offset - 1] + 269
-                end
-                dns_offset += opt_len
-            end
-            # RCODE is in DNS header byte 3, low 4 bits
-            if dns_offset + 12 <= size(payload)
-                var rcode = payload[dns_offset + 3] & 0x0F
-                if rcode == 0
-                    self._mark_registered()
-                else
-                    self._on_failure(format("rcode=%i", rcode))
-                end
-            else
-                # Treat as success if we can't read DNS
-                self._mark_registered()
-            end
+        var rcode = payload[3] & 0x0F
+        if rcode == 0
+            self._mark_registered()
         else
-            self._on_failure(format("coap %i.%02i", code_class, code_detail))
+            self._on_failure(format("rcode=%i", rcode))
         end
     end
 
@@ -820,7 +760,8 @@ class Matter_SRP_Client
         if size(s) == 0
             return []
         end
-        # Berry doesn't have a built-in split; do it manually.
+        # Split by '.' — note: Berry's string.split exists but is not used
+        # here because we need to handle trailing dot and empty components.
         var labels = []
         var start = 0
         var i = 0
