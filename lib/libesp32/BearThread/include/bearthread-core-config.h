@@ -68,9 +68,14 @@
 #define OPENTHREAD_CONFIG_RADIO_LINK_TREL_ENABLE               0
 
 /* ---- Enable features we need ---- */
-#define OPENTHREAD_CONFIG_SRP_CLIENT_ENABLE                    1
-#define OPENTHREAD_CONFIG_SRP_CLIENT_BUFFERS_MAX_SERVICES      5
-#define OPENTHREAD_CONFIG_ECDSA_ENABLE                         1
+/* SRP client is NOT compiled into BearThread. The SRP client lives in Berry
+ * at lib/libesp32/berry_matter/src/embedded/Matter_SRP_Client.be and talks to
+ * the server directly over CoAP (see lib/libesp32/BearThread/src/bt_coap.cpp).
+ * ECDSA is NOT used by BearThread — signatures are done in pure Berry.
+ * The openthread code paths that would otherwise call otPlatCryptoEcdsa* and
+ * otSrpClient* are therefore disabled. */
+#define OPENTHREAD_CONFIG_SRP_CLIENT_ENABLE                    0
+#define OPENTHREAD_CONFIG_ECDSA_ENABLE                         0
 #define OPENTHREAD_CONFIG_DNS_CLIENT_ENABLE                    0
 #define OPENTHREAD_CONFIG_COAP_API_ENABLE                      1
 #define OPENTHREAD_CONFIG_IP6_SLAAC_ENABLE                     1
@@ -85,11 +90,12 @@
 
 /* ---- Logging ---- */
 #define OPENTHREAD_CONFIG_LOG_OUTPUT OPENTHREAD_CONFIG_LOG_OUTPUT_PLATFORM_DEFINED
-#define OPENTHREAD_CONFIG_LOG_LEVEL                            OT_LOG_LEVEL_INFO
+#define OPENTHREAD_CONFIG_LOG_LEVEL                            OT_LOG_LEVEL_DEBG
 #define OPENTHREAD_CONFIG_LOG_LEVEL_DYNAMIC_ENABLE             1
 
 /* ---- Resource sizing ---- */
 #define OPENTHREAD_CONFIG_NUM_MESSAGE_BUFFERS                  44
+#define OPENTHREAD_CONFIG_6LOWPAN_REASSEMBLY_TIMEOUT          10
 #define OPENTHREAD_CONFIG_DTLS_MAX_CONTENT_LEN               768
 #define OPENTHREAD_CONFIG_MAC_MAX_CSMA_BACKOFFS_DIRECT         4
 #define OPENTHREAD_CONFIG_TMF_ADDRESS_QUERY_TIMEOUT           3

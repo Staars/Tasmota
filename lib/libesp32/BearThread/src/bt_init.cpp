@@ -15,6 +15,7 @@
 #include <string.h>
 #include <sys/select.h>
 #include <sys/time.h>
+#include <unistd.h>
 
 #include "esp_log.h"
 #include "esp_vfs_eventfd.h"
@@ -78,6 +79,14 @@ esp_err_t bt_platform_init(void)
         return ret;
     }
 
+    /* Init alarm timer (ESP one-shot timer + eventfd to wake select()) */
+    ret = bt_alarm_init();
+    if (ret != ESP_OK) {
+        bt_radio_deinit();
+        bt_lock_deinit();
+        return ret;
+    }
+
     /* Init OT instance */
     bt_lock_acquire(portMAX_DELAY);
     s_bt_instance = otInstanceInitSingle();
@@ -103,6 +112,7 @@ esp_err_t bt_platform_init(void)
 
 esp_err_t bt_platform_deinit(void)
 {
+    bt_alarm_deinit();
     otInstanceFinalize(bt_get_instance());
     bt_radio_deinit();
     bt_lock_deinit();
@@ -133,6 +143,15 @@ esp_err_t bt_launch_mainloop(void)
         bt_radio_update(&read_fds, &max_fd);
         bt_alarm_update(&timeout);
 
+        /* Add alarm eventfd so the ESP timer callback can wake select() */
+        {
+            int alarm_fd = bt_alarm_get_event_fd();
+            if (alarm_fd >= 0) {
+                FD_SET(alarm_fd, &read_fds);
+                if (alarm_fd > max_fd) max_fd = alarm_fd;
+            }
+        }
+
         if (otTaskletsArePending(instance)) {
             timeout.tv_sec = 0;
             timeout.tv_usec = 0;
@@ -142,6 +161,15 @@ esp_err_t bt_launch_mainloop(void)
         /* Wait for events */
         if (select(max_fd + 1, &read_fds, NULL, NULL, &timeout) >= 0) {
             bt_lock_acquire(portMAX_DELAY);
+
+            /* Consume alarm eventfd wakeup (if any) */
+            {
+                int alarm_fd = bt_alarm_get_event_fd();
+                if (alarm_fd >= 0 && FD_ISSET(alarm_fd, &read_fds)) {
+                    uint64_t val;
+                    read(alarm_fd, &val, sizeof(val));
+                }
+            }
 
             /* Process radio events */
             bt_radio_process(instance, &read_fds);

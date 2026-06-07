@@ -179,13 +179,16 @@ esp_err_t bt_radio_process(otInstance *instance, const fd_set *read_fds)
         otPlatRadioEnergyScanDone(instance, s_ed_power);
     }
 
-    while (atomic_load(&s_recv_queue.used)) {
-        if (s_receive_frame[s_recv_queue.head].mPsdu != NULL) {
-            otPlatRadioReceiveDone(instance, &s_receive_frame[s_recv_queue.head], OT_ERROR_NONE);
-            esp_ieee802154_receive_handle_done(s_receive_frame[s_recv_queue.head].mPsdu - 1);
-            s_receive_frame[s_recv_queue.head].mPsdu = NULL;
-            s_recv_queue.head = (s_recv_queue.head + 1) % BT_RX_BUFFER_SIZE;
-            atomic_fetch_sub(&s_recv_queue.used, 1);
+    if (get_event(EVENT_RX_DONE)) {
+        clr_event(EVENT_RX_DONE);
+        while (atomic_load(&s_recv_queue.used)) {
+            if (s_receive_frame[s_recv_queue.head].mPsdu != NULL) {
+                otPlatRadioReceiveDone(instance, &s_receive_frame[s_recv_queue.head], OT_ERROR_NONE);
+                esp_ieee802154_receive_handle_done(s_receive_frame[s_recv_queue.head].mPsdu - 1);
+                s_receive_frame[s_recv_queue.head].mPsdu = NULL;
+                s_recv_queue.head = (s_recv_queue.head + 1) % BT_RX_BUFFER_SIZE;
+                atomic_fetch_sub(&s_recv_queue.used, 1);
+            }
         }
     }
 

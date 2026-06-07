@@ -57,6 +57,48 @@ esp_err_t bt_alarm_init(void);
 void      bt_alarm_deinit(void);
 void      bt_alarm_update(struct timeval *timeout);
 esp_err_t bt_alarm_process(otInstance *instance);
+int       bt_alarm_get_event_fd(void);
+
+/* ---- CoAP transport (for Berry-side SRP client) ----
+ *
+ * Provides a simple request/response wrapper around the OpenThread CoAP
+ * client. Berry builds DNS-UPDATE payloads and asks BearThread to send them
+ * as confirmable POSTs. Responses are queued internally and delivered
+ * asynchronously when Berry calls bt_coap_poll_response().
+ *
+ * The OT-internal CoAP request can be sent only with the BT lock held;
+ * callers do NOT need to lock — the wrapper handles that.
+ */
+#define BT_COAP_MAX_URI_LEN     64
+#define BT_COAP_MAX_ADDR_LEN    64
+#define BT_COAP_RX_QUEUE_LEN    8
+
+typedef struct {
+    int32_t  userdata;     /* opaque tag from request                       */
+    int32_t  err;          /* 0=OK, OT_ERROR_* code on failure/timeout      */
+    uint16_t code;         /* CoAP response code (0 on timeout)             */
+    char     addr[BT_COAP_MAX_ADDR_LEN]; /* peer IPv6 string, NUL-terminated */
+    uint16_t port;
+    uint8_t *payload;      /* heap-allocated copy; caller frees after use   */
+    uint16_t payload_len;
+} bt_coap_response_t;
+
+/* Lazy-initialised on first call. */
+esp_err_t bt_coap_init(void);
+void      bt_coap_deinit(void);
+
+/* Send a CoAP confirmable POST. payload is copied internally; caller may
+ * free after this returns. Response is delivered via the queue.
+ * Returns ESP_OK if the request was queued for transmission. */
+esp_err_t bt_coap_send_request(uint32_t userdata,
+                               const char *uri,
+                               int content_format,
+                               const uint8_t *payload, size_t payload_len,
+                               const char *addr_str, uint16_t port);
+
+/* Poll one response from the queue. Returns 1 if received (caller frees
+ * resp->payload), 0 if queue is empty, -1 on error. */
+int bt_coap_poll_response(bt_coap_response_t *resp);
 
 #ifdef __cplusplus
 }
