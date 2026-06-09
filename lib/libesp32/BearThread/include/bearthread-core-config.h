@@ -90,7 +90,7 @@
 
 /* ---- Logging ---- */
 #define OPENTHREAD_CONFIG_LOG_OUTPUT OPENTHREAD_CONFIG_LOG_OUTPUT_PLATFORM_DEFINED
-#define OPENTHREAD_CONFIG_LOG_LEVEL                            OT_LOG_LEVEL_DEBG
+#define OPENTHREAD_CONFIG_LOG_LEVEL                            OT_LOG_LEVEL_NOTE
 #define OPENTHREAD_CONFIG_LOG_LEVEL_DYNAMIC_ENABLE             1
 
 /* ---- Resource sizing ---- */

@@ -71,13 +71,13 @@ class Matter_SRP_Client
     static kClassAny   = 255     # SIG(0) uses class=ANY
 
     # KEY record fields
-    static kProtocolDnsSec = 3
+    static kProtocolDnsSec = 0
     static kAlgorithmEcdsaP256Sha256 = 13
     # Key flags: (aUseFlags << 8) | aOwnerFlags in mFlags[0];
     # aSignatoryFlags in low nibble of mFlags[1].
-    # We use NOC=0 (no confidentiality), ZNZ=2 (non-zone), Signatory=General=1.
+    # NOC=0 (no confidentiality), ZNZ=0, Signatory=General=1.
     static kKeyFlagsHigh = 0x00  # NOC, no confidentiality
-    static kKeyFlagsLow  = 0x02  # ZNZ
+    static kKeyFlagsLow  = 0x00
     static kSignatoryGeneral = 0x01
 
     # Update Lease OPT option code
@@ -138,7 +138,6 @@ class Matter_SRP_Client
     var last_response         # "ok" / "timeout" / "error" / "noerror" (RCODE text)
     var last_error_logged     # int ms - throttle error logging
     var started               # bool
-    var udp_open              # bool
 
     #########################################################################
     # Constructor
@@ -161,7 +160,6 @@ class Matter_SRP_Client
         self.last_response = ""
         self.last_error_logged = 0
         self.started = false
-        self.udp_open = false
     end
 
     #########################################################################
@@ -248,6 +246,21 @@ class Matter_SRP_Client
         end
     end
 
+    # Forcefully stop the SRP client. Resets to kStateStopped, clears
+    # hostname and services. Does NOT close the shared UDP socket.
+    def stop()
+        if self.state == self.kStateStopped
+            return
+        end
+        self.state = self.kStateStopped
+        self.state_str_ = "Stopped"
+        self.hostname = nil
+        self.services = []
+        self.server_addr = nil
+        self.last_attempt_ms = 0
+        self.backoff_ms = self.kInitialBackoffMs
+    end
+
     # Read-only accessors
     def state_str()
         return self.state_str_
@@ -268,12 +281,6 @@ class Matter_SRP_Client
     # Main tick (called from Matter_Thread_Device.every_50ms)
     #########################################################################
     def every_50ms()
-        # Close UDP socket if no longer needed
-        if (self.state == self.kStateStopped || self.state == self.kStateRemoved) && self.udp_open
-            import OT
-            OT.udp_close()
-            self.udp_open = false
-        end
         # Drain any UDP responses that came in
         self._drain_responses()
 
@@ -469,13 +476,14 @@ class Matter_SRP_Client
         # Send via UDP (DNS UPDATE)
         try
             import OT
-            if !self.udp_open
-                OT.udp_open(0)
-                self.udp_open = true
-            end
             OT.udp_send(self.server_addr, self.server_port, msg)
+            var sent_id = self.msg_id
             self.msg_id = (self.msg_id + 1) & self.kMsgIdMax
             self.last_attempt_ms = tasmota.millis()
+            log(format("MTR: SRP sent msg_id=%i", sent_id), 2)
+            if tasmota.loglevel(3)
+                log(format("MTR: SRP UPDATE msg_id=%i len=%i hex=%s", sent_id, size(msg), msg.tohex()), 3)
+            end
             if self.state == self.kStateToAdd || self.state == self.kStateToRefresh
                 if self.state == self.kStateToAdd
                     self.state = self.kStateAdding
@@ -492,9 +500,6 @@ class Matter_SRP_Client
     end
 
     def _drain_responses()
-        if !self.udp_open
-            return
-        end
         try
             import OT
             while true
@@ -503,6 +508,9 @@ class Matter_SRP_Client
                     return
                 end
                 # resp = [payload_bytes, addr_str, port]
+                if resp[2] != self.server_port
+                    continue   # skip packets not from SRP server
+                end
                 var payload = resp[0]
                 self._on_success(payload)
             end
@@ -749,6 +757,15 @@ class Matter_SRP_Client
         return out
     end
 
+    # Encode a DNS name compression pointer (RFC 1035 §4.1.4).
+    # Pointer = 0xC000 | offset (14-bit). Assumes offset < 16384.
+    def _encode_ptr(off)
+        var b = bytes()
+        b.add(0xC0 | ((off >> 8) & 0x3F))
+        b.add(off & 0xFF)
+        return b
+    end
+
     # Convert a dotted string (e.g. "abc._matter._tcp.default.service.arpa")
     # to a list of labels.
     def _name_to_labels(name)
@@ -815,6 +832,26 @@ class Matter_SRP_Client
     end
 
     #########################################################################
+    # Key tag computation (RFC 4034 Appendix B)
+    #########################################################################
+    # Compute 16-bit one's complement sum over KEY RDATA bytes.
+    def _calc_key_tag(rdata)
+        var sum = 0
+        var i = 0
+        while i + 1 < size(rdata)
+            sum += (rdata[i] << 8) | rdata[i + 1]
+            i += 2
+        end
+        if i < size(rdata)
+            sum += (rdata[i] << 8)
+        end
+        while (sum >> 16) != 0
+            sum = (sum & 0xFFFF) + (sum >> 16)
+        end
+        return sum & 0xFFFF
+    end
+
+    #########################################################################
     # Full UPDATE message builder
     #########################################################################
     # Build the DNS UPDATE message for the current state.
@@ -873,11 +910,11 @@ class Matter_SRP_Client
             while j < size(stype_labels)
                 msg.add(size(stype_labels[j]))
                 msg .. stype_labels[j]
-                j += 1
-            end
-            msg.add(0xC0); msg.add(domain_offset & 0xFF)  # pointer to domain
+            j += 1
+        end
+        msg .. self._encode_ptr(domain_offset)  # pointer to domain
 
-            # PTR record
+        # PTR record
             var ptr_class = removing ? self.kClassNone : self.kClassIn
             var ptr_ttl = removing ? 0 : self.lease_sec
             var ptr_hdr = self._rr_header(self.kTypePtr, ptr_class, ptr_ttl)
@@ -886,7 +923,7 @@ class Matter_SRP_Client
             var inst_off = size(msg)
             msg.add(size(inst_label))
             msg .. inst_label
-            msg.add(0xC0); msg.add(service_name_off & 0xFF)
+            msg .. self._encode_ptr(service_name_off)
             self._rr_set_rdlength(msg, inst_off)
             update_record_count += 1
 
@@ -900,11 +937,11 @@ class Matter_SRP_Client
                     var sub_name_off = size(msg)
                     msg.add(size(sub)); msg .. sub
                     msg.add(4); msg .. "_sub"
-                    msg.add(0xC0); msg.add(service_name_off & 0xFF)
+                    msg .. self._encode_ptr(service_name_off)
                     # PTR RDATA: pointer to instance name
                     msg .. self._rr_header(self.kTypePtr, self.kClassIn, self.lease_sec)
                     var sub_inst_off = size(msg)
-                    msg.add(0xC0); msg.add(inst_off & 0xFF)
+                    msg .. self._encode_ptr(inst_off)
                     self._rr_set_rdlength(msg, sub_inst_off)
                     update_record_count += 1
                     k += 1
@@ -914,13 +951,13 @@ class Matter_SRP_Client
             if !removing
                 # Service Description: <instance>.<service> (delete-all then SRV + TXT)
                 # "delete all RRsets from a name" (RFC 2136 §2.5.3)
-                msg.add(0xC0); msg.add(inst_off & 0xFF)  # pointer to instance name
+                msg .. self._encode_ptr(inst_off)  # pointer to instance name
                 var del_hdr = self._rr_header(self.kTypeAny, self.kClassAny, 0)
                 msg .. del_hdr
                 update_record_count += 1
 
                 # SRV: priority=0, weight=0, port, target=hostname.domain
-                msg.add(0xC0); msg.add(inst_off & 0xFF)
+                msg .. self._encode_ptr(inst_off)
                 var srv_hdr = self._rr_header(self.kTypeSrv, self.kClassIn, self.lease_sec)
                 msg .. srv_hdr
                 var srv_data_off = size(msg)
@@ -929,12 +966,12 @@ class Matter_SRP_Client
                 msg.add((port >> 8) & 0xFF); msg.add(port & 0xFF)  # port
                 # target: <hostname>.<domain> in uncompressed form
                 msg.add(size(self.hostname)); msg .. self.hostname
-                msg.add(0xC0); msg.add(domain_offset & 0xFF)
+                msg .. self._encode_ptr(domain_offset)
                 self._rr_set_rdlength(msg, srv_data_off)
                 update_record_count += 1
 
                 # TXT records
-                msg.add(0xC0); msg.add(inst_off & 0xFF)
+                msg .. self._encode_ptr(inst_off)
                 var txt_hdr = self._rr_header(self.kTypeTxt, self.kClassIn, self.lease_sec)
                 msg .. txt_hdr
                 var txt_data_off = size(msg)
@@ -952,7 +989,7 @@ class Matter_SRP_Client
         # 3b. Host description (delete-all, AAAA, KEY)
         var host_name_off = size(msg)
         msg.add(size(self.hostname)); msg .. self.hostname
-        msg.add(0xC0); msg.add(domain_offset & 0xFF)
+        msg .. self._encode_ptr(domain_offset)
 
         # delete-all RRset
         var host_del = self._rr_header(self.kTypeAny, self.kClassAny, 0)
@@ -964,7 +1001,7 @@ class Matter_SRP_Client
         var addrs = self._get_thread_addresses()
         var j = 0
         while j < size(addrs)
-            msg.add(0xC0); msg.add(host_name_off & 0xFF)
+            msg .. self._encode_ptr(host_name_off)
             var aaaa_hdr = self._rr_header(self.kTypeAaaa, self.kClassIn, self.lease_sec)
             msg .. aaaa_hdr
             var aaaa_data_off = size(msg)
@@ -975,7 +1012,7 @@ class Matter_SRP_Client
         end
 
         # KEY record: uncompressed, with our public key
-        msg.add(0xC0); msg.add(host_name_off & 0xFF)
+        msg .. self._encode_ptr(host_name_off)
         var key_hdr_off = size(msg)
         msg .. self._rr_header(self.kTypeKey, self.kClassIn, self.lease_sec)
         var key_data_off = size(msg)
@@ -989,6 +1026,15 @@ class Matter_SRP_Client
         self._rr_set_rdlength(msg, key_data_off)
         update_record_count += 1
 
+        # Compute key tag for SIG(0) from KEY RDATA (RFC 4034 Appendix B)
+        var key_tag_bytes = bytes()
+        key_tag_bytes.add(self.kKeyFlagsHigh)
+        key_tag_bytes.add(self.kKeyFlagsLow)
+        key_tag_bytes.add(self.kProtocolDnsSec)
+        key_tag_bytes.add(self.kAlgorithmEcdsaP256Sha256)
+        key_tag_bytes .. self.key_pub
+        var key_tag = self._calc_key_tag(key_tag_bytes)
+
         # 4. Additional section
         # 4a. OPT (Update Lease option)
         # OPT has root name (empty) + type=OPT, class=udpsize, ttl=0, rdlen=N
@@ -996,8 +1042,11 @@ class Matter_SRP_Client
         msg.add(0); msg.add(self.kTypeOpt)
         msg.add((self.kUdpPayloadSize >> 8) & 0xFF); msg.add(self.kUdpPayloadSize & 0xFF)
         msg.add(0); msg.add(0); msg.add(0); msg.add(0)  # TTL
+        # RDLENGTH placeholder (2 bytes, filled below)
+        var rdlen_off = size(msg)
+        msg.add(0); msg.add(0)
         # RDATA: Update Lease option
-        var lease_opt_off = size(msg)
+        var lease_rdata_off = size(msg)
         msg.add(0); msg.add(self.kOptUpdateLease)  # option code
         msg.add(0); msg.add(8)                     # option length (8 = lease + key_lease)
         msg.add((self.lease_sec >> 24) & 0xFF)
@@ -1008,11 +1057,10 @@ class Matter_SRP_Client
         msg.add((self.key_lease_sec >> 16) & 0xFF)
         msg.add((self.key_lease_sec >> 8) & 0xFF)
         msg.add(self.key_lease_sec & 0xFF)
-        var lease_opt_end = size(msg)
-        var lease_opt_len = lease_opt_end - lease_opt_off
-        # Fix OPT RDLENGTH (it's at lease_opt_off - 2 in the OPT header)
-        msg[lease_opt_off - 2] = (lease_opt_len >> 8) & 0xFF
-        msg[lease_opt_off - 1] = lease_opt_len & 0xFF
+        # Fix OPT RDLENGTH
+        var rdlen = size(msg) - lease_rdata_off
+        msg[rdlen_off]     = (rdlen >> 8) & 0xFF
+        msg[rdlen_off + 1] = rdlen & 0xFF
 
         # 4b. SIG(0) record (placeholder, to be signed and rewritten)
         # Owner name is root (single 0x00 byte).
@@ -1037,12 +1085,22 @@ class Matter_SRP_Client
         msg.add(0)
         # original TTL = 0
         msg.add(0); msg.add(0); msg.add(0); msg.add(0)
-        # signature expiration = 0
-        msg.add(0); msg.add(0); msg.add(0); msg.add(0)
-        # signature inception = 0
-        msg.add(0); msg.add(0); msg.add(0); msg.add(0)
-        # key tag = 0
-        msg.add(0); msg.add(0)
+        # Use wall clock if available (SetUTCTime feeds tasmota.cmd("time ...")),
+        # otherwise fall back to a synthetic epoch from uptime.
+        var utc_now = tasmota.rtc("utc")
+        if utc_now == nil || utc_now == 0
+            utc_now = tasmota.millis() / 1000 + 1700000000
+        end
+        var inception = utc_now
+        var expire = self.lease_sec
+        if expire < 300   expire = 300   end
+        var expiration = inception + expire
+        msg.add((expiration >> 24) & 0xFF); msg.add((expiration >> 16) & 0xFF)
+        msg.add((expiration >> 8) & 0xFF);  msg.add(expiration & 0xFF)
+        msg.add((inception >> 24) & 0xFF);  msg.add((inception >> 16) & 0xFF)
+        msg.add((inception >> 8) & 0xFF);   msg.add(inception & 0xFF)
+        # key tag from KEY RDATA (RFC 4034 Appendix B)
+        msg.add((key_tag >> 8) & 0xFF); msg.add(key_tag & 0xFF)
         # signer's name in canonical (uncompressed) form: <hostname>.default.service.arpa.
         var signer_name_off = size(msg)
         msg.add(size(self.hostname)); msg .. self.hostname
@@ -1073,8 +1131,11 @@ class Matter_SRP_Client
 
         # 5. Update the header counts
         # Header was: [ID 2][Flags 2][ZOC 2][PRC 2][UPC 2][ADC 2]
-        # We need to *reduce* ADCOUNT by 1 before signing (so SIG is not
-        # included in the signature), then sign, then restore ADCOUNT=2.
+        # Set UPCOUNT to the real value BEFORE signing so the signed
+        # data includes the correct count (RFC 2931 §2.3).
+        msg[update_count_off]     = (update_record_count >> 8) & 0xFF
+        msg[update_count_off + 1] = update_record_count & 0xFF
+        # Reduce ADCOUNT by 1 before signing (SIG not included in signature)
         msg[addtl_count_off]     = 0
         msg[addtl_count_off + 1] = 1
 
@@ -1083,7 +1144,7 @@ class Matter_SRP_Client
         #   to the start of the SIG record.
         var sig_rdata = bytes()
         sig_rdata .. msg[sig_rdata_off .. sig_placeholder_off - 1]
-        var to_sign = sig_rdata + msg[0 .. sig_owner_off - 1]
+        var to_sign = msg[0 .. sig_owner_off - 1] + sig_rdata
 
         # Sign and low-S normalize. Note: ecdsa_sign_sha256 takes the raw
         # message bytes and hashes them with SHA-256 internally — do NOT
@@ -1127,10 +1188,6 @@ class Matter_SRP_Client
         # Restore ADCOUNT to 2 (now SIG is included)
         msg[addtl_count_off]     = 0
         msg[addtl_count_off + 1] = 2
-
-        # Update UPCOUNT
-        msg[update_count_off]     = (update_record_count >> 8) & 0xFF
-        msg[update_count_off + 1] = update_record_count & 0xFF
 
         return msg
     end
@@ -1177,16 +1234,21 @@ class Matter_SRP_Client
                 var i = 0
                 while i < size(a)
                     var s = a[i]
+                    if type(s) != "string"
+                        i += 1
+                        continue
+                    end
                     # Skip link-local fe80::/10
                     if size(s) >= 4 && string.find(s, "fe8") == 0
                         # fe80..febf
                         i += 1
                         continue
                     end
-                    try
-                        addrs.push(self._ipv6_string_to_bytes(s))
-                    except .. as e2, m2
-                        log(format("MTR: SRP skip bad addr %s: %s %s", str(s), str(e2), str(m2)), 3)
+                    var addr_bytes = matter.get_ip_bytes(s)
+                    if addr_bytes != nil && size(addr_bytes) == 16
+                        addrs.push(addr_bytes)
+                    else
+                        log(format("MTR: SRP skip bad addr %s: get_ip_bytes failed", str(s)), 3)
                     end
                     i += 1
                 end
@@ -1197,67 +1259,6 @@ class Matter_SRP_Client
         return addrs
     end
 
-    def _ipv6_string_to_bytes(s)
-        # Parse "XXXX:XXXX:XXXX:XXXX:XXXX:XXXX:XXXX:XXXX" to 16 bytes.
-        # NOTE: bytes(-16) creates a fixed, zero-filled 16-byte buffer.
-        # bytes(16) would only RESERVE 16 bytes (len stays 0) and indexing fails.
-        var out = bytes(-16)
-        # Strip optional "[" and "]"
-        if size(s) > 0 && s[0] == '['
-            s = s[1 .. size(s) - 1]
-        end
-        if size(s) > 0 && s[size(s) - 1] == ']'
-            s = s[0 .. size(s) - 2]
-        end
-        # Handle "::" (zero compression)
-        import string
-        var parts = string.split(s, ":")
-        # Collapse "::"
-        var empty_idx = -1
-        var j = 0
-        while j < size(parts)
-            if size(parts[j]) == 0
-                empty_idx = j
-            end
-            j += 1
-        end
-        var addr_parts = []
-        if empty_idx >= 0
-            var k = 0
-            while k < empty_idx
-                addr_parts.push(parts[k])
-                k += 1
-            end
-            var num_zeros = 8 - (size(parts) - 1)
-            k = 0
-            while k < num_zeros
-                addr_parts.push("0")
-                k += 1
-            end
-            k = empty_idx + 1
-            while k < size(parts)
-                addr_parts.push(parts[k])
-                k += 1
-            end
-        else
-            addr_parts = parts
-        end
-        if size(addr_parts) != 8
-            return out   # parse failed
-        end
-        var b = 0
-        var p = 0
-        while p < 8
-            # Berry's int() ignores a base argument; prepend "0x" so the
-            # string is parsed as hexadecimal (int("0x830b") -> 33547).
-            var v = int("0x" + addr_parts[p])
-            out[b]     = (v >> 8) & 0xFF
-            out[b + 1] = v & 0xFF
-            b += 2
-            p += 1
-        end
-        return out
-    end
 end
 
 matter.SRP_Client = Matter_SRP_Client
