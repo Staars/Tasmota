@@ -109,8 +109,8 @@ void otPlatAlarmMilliStartAt(otInstance *aInstance, uint32_t aT0, uint32_t aDt)
 {
     s_alarm_ms = aT0 + aDt;
     s_is_ms_running = true;
-    otPlatLog(OT_LOG_LEVEL_INFO, OT_LOG_REGION_CORE, "ALARM: ms start t0=%lu dt=%lu target=%lu",
-              (unsigned long)aT0, (unsigned long)aDt, (unsigned long)s_alarm_ms);
+    // otPlatLog(OT_LOG_LEVEL_INFO, OT_LOG_REGION_CORE, "ALARM: ms start t0=%lu dt=%lu target=%lu",
+    //           (unsigned long)aT0, (unsigned long)aDt, (unsigned long)s_alarm_ms);
 
     /* Arm the ESP one-shot timer to wake select() at the target time.
      * This avoids the race where the alarm is set (e.g. from Berry FFI)
@@ -126,8 +126,8 @@ void otPlatAlarmMilliStartAt(otInstance *aInstance, uint32_t aT0, uint32_t aDt)
 void otPlatAlarmMilliStop(otInstance *aInstance)
 {
     if (s_is_ms_running) {
-        otPlatLog(OT_LOG_LEVEL_INFO, OT_LOG_REGION_CORE, "ALARM: ms stop target=%lu",
-                  (unsigned long)s_alarm_ms);
+        // otPlatLog(OT_LOG_LEVEL_INFO, OT_LOG_REGION_CORE, "ALARM: ms stop target=%lu",
+        //           (unsigned long)s_alarm_ms);
     }
     s_is_ms_running = false;
     if (s_ms_timer) {
@@ -190,16 +190,16 @@ esp_err_t bt_alarm_process(otInstance *instance)
 {
     if (s_is_ms_running && is_expired(s_alarm_ms, otPlatAlarmMilliGetNow())) {
         uint32_t now = otPlatAlarmMilliGetNow();
-        otPlatLog(OT_LOG_LEVEL_INFO, OT_LOG_REGION_CORE, "ALARM: ms FIRED target=%lu now=%lu drift=%ld",
-                  (unsigned long)s_alarm_ms, (unsigned long)now, (long)(now - s_alarm_ms));
+        // otPlatLog(OT_LOG_LEVEL_INFO, OT_LOG_REGION_CORE, "ALARM: ms FIRED target=%lu now=%lu drift=%ld",
+        //           (unsigned long)s_alarm_ms, (unsigned long)now, (long)(now - s_alarm_ms));
         s_is_ms_running = false;
         otPlatAlarmMilliFired(instance);
     } else if (s_is_ms_running) {
         uint32_t now = otPlatAlarmMilliGetNow();
         uint32_t remain = calculate_duration(s_alarm_ms, now);
         if (remain < 500) {
-            otPlatLog(OT_LOG_LEVEL_INFO, OT_LOG_REGION_CORE, "ALARM: ms pending target=%lu now=%lu remain=%lu",
-                      (unsigned long)s_alarm_ms, (unsigned long)now, (unsigned long)remain);
+            // otPlatLog(OT_LOG_LEVEL_INFO, OT_LOG_REGION_CORE, "ALARM: ms pending target=%lu now=%lu remain=%lu",
+            //           (unsigned long)s_alarm_ms, (unsigned long)now, (unsigned long)remain);
         }
     }
     if (s_is_us_running && is_expired(s_alarm_us, otPlatAlarmMicroGetNow())) {

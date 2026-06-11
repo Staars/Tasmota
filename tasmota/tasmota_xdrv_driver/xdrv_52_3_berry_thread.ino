@@ -471,17 +471,35 @@ extern "C" int be_OT_netdata_services(bvm *vm) {
   be_return(vm);
 }
 
-// OT.coex_prefer_thread(prefer) - set the 802.15.4 / Wi-Fi coexistence preference.
+// ESP-IDF 802.15.4 coexistence config. Declared locally to avoid pulling the
+// private esp_coex / esp_ieee802154 headers into this .ino. The struct layout
+// matches esp_ieee802154_coex_config_t { idle, txrx, txrx_at } and the symbol
+// has C linkage (libieee802154.a / esp_ieee802154.c).
+// ieee802154_coex_event_t levels: HIGH=1, MIDDLE=2, LOW=3, IDLE=4.
+typedef struct {
+  int idle;
+  int txrx;
+  int txrx_at;
+} ot_coex_config_t;
+extern "C" esp_err_t esp_ieee802154_set_coex_config(ot_coex_config_t config);
+
+// OT.coex_prefer_thread(prefer) - bias the 802.15.4 / Wi-Fi coexistence toward Thread.
 //
-// ESP32-C6 has built-in coexistence between Wi-Fi, BLE, and 802.15.4 (used by
-// Thread). When Thread is joining/operating on the same chip as Wi-Fi, the
-// radio scheduler may bias toward Wi-Fi; that can starve Thread retransmissions
-// and cause CASE timeouts / SRP registration timeouts. Calling this with true
-// nudges the scheduler to give 802.15.4 more airtime.
+// ESP32-C6 shares a single 2.4 GHz RF between Wi-Fi, BLE, and 802.15.4 (Thread)
+// via a priority-based time-division scheduler. By default the 802.15.4 normal
+// receive operation is assigned the LOWEST priority, so Wi-Fi/BLE take the RF
+// whenever they need it; that can starve Thread retransmissions and cause CASE
+// timeouts / SRP registration timeouts.
+//
+// The Wi-Fi/BT preference enum (esp_coex_preference_set) does NOT cover
+// 802.15.4 — it only arbitrates Wi-Fi vs. Bluetooth. 802.15.4 coexistence is a
+// separate mechanism driven by per-event priorities (PTI). We raise the
+// 802.15.4 priorities via esp_ieee802154_set_coex_config() so Thread frames win
+// arbitration; passing false restores the ESP-IDF defaults.
 //
 // Args:
-//   prefer : true → prefer 802.15.4 over Wi-Fi
-//            false → balance (default; let scheduler decide)
+//   prefer : true → raise 802.15.4 priority (idle/txrx/txrx_at = HIGH)
+//            false → restore defaults (idle=IDLE, txrx=LOW, txrx_at=MIDDLE)
 //
 // Returns true on success.
 extern "C" int be_OT_coex_prefer_thread(bvm *vm) {
@@ -491,20 +509,17 @@ extern "C" int be_OT_coex_prefer_thread(bvm *vm) {
   }
   bool prefer_thread = be_tobool(vm, 1);
 
-  // The ESP-IDF coexist API exposes esp_coex_preference_set(esp_coex_prefer_t)
-  // but the legacy symbol coex_preference_set() is what libcoexist.a exports.
-  // Both take the same enum: 0=WIFI, 1=BT (groups 802.15.4), 2=BALANCE.
-  int prefer = prefer_thread ? 1 : 2;
-
-  // The legacy coex_preference_set() comes from libcoexist.a in the Arduino
-  // ESP32 core. There is no public header in the arduino-libs esp32c6 include
-  // tree, so we declare it locally to avoid pulling private headers.
-  extern esp_err_t coex_preference_set(int prefer);
-  esp_err_t err = coex_preference_set(prefer);
+  ot_coex_config_t cfg;
+  if (prefer_thread) {
+    cfg = (ot_coex_config_t){ /*idle*/1, /*txrx*/1, /*txrx_at*/1 };   // all HIGH
+  } else {
+    cfg = (ot_coex_config_t){ /*idle*/4, /*txrx*/3, /*txrx_at*/2 };   // IDLE / LOW / MIDDLE (defaults)
+  }
+  esp_err_t err = esp_ieee802154_set_coex_config(cfg);
 
   if (err == ESP_OK) {
-    AddLog(LOG_LEVEL_INFO, PSTR("OT : coexistence preference set to %s"),
-           prefer_thread ? "thread" : "balance");
+    AddLog(LOG_LEVEL_INFO, PSTR("OT : 802.15.4 coex priority set to %s"),
+           prefer_thread ? "thread (high)" : "default");
   } else {
     AddLog(LOG_LEVEL_INFO, PSTR("OT : coex_prefer_thread failed: %d"), err);
   }

@@ -71,7 +71,7 @@ class Matter_SRP_Client
     static kClassAny   = 255     # SIG(0) uses class=ANY
 
     # KEY record fields
-    static kProtocolDnsSec = 0
+    static kProtocolDnsSec = 3  # DNSSEC (RFC 2931 §2.3 / RFC 2535 §3.1.2)
     static kAlgorithmEcdsaP256Sha256 = 13
     # Key flags: (aUseFlags << 8) | aOwnerFlags in mFlags[0];
     # aSignatoryFlags in low nibble of mFlags[1].
@@ -508,8 +508,14 @@ class Matter_SRP_Client
                     return
                 end
                 # resp = [payload_bytes, addr_str, port]
+                if tasmota.loglevel(3)
+                    log(format("MTR: SRP recv %s:%i len=%i", resp[1], resp[2], size(resp[0])), 3)
+                end
                 if resp[2] != self.server_port
-                    continue   # skip packets not from SRP server
+                    if tasmota.loglevel(3)
+                        log(format("MTR: SRP recv skip (port %i != %i)", resp[2], self.server_port), 3)
+                    end
+                    break   # not an SRP response, leave remaining packets for Matter handler
                 end
                 var payload = resp[0]
                 self._on_success(payload)
@@ -1115,9 +1121,8 @@ class Matter_SRP_Client
         var signer_name_end = size(msg)
         # signature placeholder (will be filled)
         var sig_placeholder_off = size(msg)
-        # We don't know the size of the ASN.1/DER yet; reserve the maximum
-        # (72 bytes) and fix at the end.
-        var max_sig_size = 72
+        # ECDSA P-256 signature is a fixed 64 bytes (raw r||s, no DER)
+        var max_sig_size = 64
         var sig_i = 0
         while sig_i < max_sig_size
             msg.add(0xFF)
@@ -1139,12 +1144,15 @@ class Matter_SRP_Client
         msg[addtl_count_off]     = 0
         msg[addtl_count_off + 1] = 1
 
-        # Build the data to sign:
+        # Build the data to sign (RFC 2931 3.1), in order:
         #   SIG RDATA wire (with empty signature) || DNS message from byte 0
-        #   to the start of the SIG record.
+        #   up to the start of the SIG record.
         var sig_rdata = bytes()
         sig_rdata .. msg[sig_rdata_off .. sig_placeholder_off - 1]
-        var to_sign = msg[0 .. sig_owner_off - 1] + sig_rdata
+        # RFC 2931 3.1: data = SIG_RDATA(without signature) || (request - SIG).
+        # The SIG RDATA MUST come first, then the request message up to (but
+        # not including) the SIG RR owner name.
+        var to_sign = sig_rdata + msg[0 .. sig_owner_off - 1]
 
         # Sign and low-S normalize. Note: ecdsa_sign_sha256 takes the raw
         # message bytes and hashes them with SHA-256 internally — do NOT
@@ -1162,14 +1170,9 @@ class Matter_SRP_Client
             raise "internal_error", "ECDSA sign returned nil"
         end
         var sig_norm = self._normalize_low_s(sig_raw)
-        var sig_der = self._ecdsa_sig_der(sig_norm)
-        if sig_der == nil
-            raise "internal_error", "ECDSA sig DER encoding failed"
-        end
-        var sig_len = size(sig_der)
-        if sig_len > max_sig_size
-            raise "internal_error", "ECDSA sig DER too large"
-        end
+        # Use raw 64-byte r||s format per RFC 6605 §4 (not DER-encoded ASN.1)
+        var sig_der = sig_norm
+        var sig_len = max_sig_size
 
         # Copy the actual signature into the placeholder region, then
         # truncate the message so the trailing zero-pad bytes don't
@@ -1179,7 +1182,7 @@ class Matter_SRP_Client
             msg[sig_placeholder_off + m] = sig_der[m]
             m += 1
         end
-        # Truncate to exact size (placeholder was 72 bytes, we use sig_len)
+        # Truncate to exact size (placeholder was 64 bytes, we use sig_len)
         msg.resize(sig_placeholder_off + sig_len)
         # Update SIG RDLENGTH to actual length
         msg[sig_rdlen_off]     = (sig_len >> 8) & 0xFF
@@ -1223,8 +1226,9 @@ class Matter_SRP_Client
     # Get our Thread addresses
     #########################################################################
     def _get_thread_addresses()
-        # Try the mesh-local EID first; if multiple, return all unicast
-        # addresses that are not link-local.
+        # Return only the OMR (mesh-local EID) address. Skip link-local fe80::
+        # and RLOC addresses (containing ":0:ff:fe00:"). Keeping the packet
+        # small improves delivery on 802.15.4 (SRP spec recommends < 500 B).
         var addrs = []
         try
             import OT
@@ -1240,7 +1244,11 @@ class Matter_SRP_Client
                     end
                     # Skip link-local fe80::/10
                     if size(s) >= 4 && string.find(s, "fe8") == 0
-                        # fe80..febf
+                        i += 1
+                        continue
+                    end
+                    # Skip RLOC (has the :0:ff:fe00: marker)
+                    if string.find(s, ":0:ff:fe00:") >= 0
                         i += 1
                         continue
                     end
