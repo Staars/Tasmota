@@ -25,6 +25,7 @@
 
 #include "openthread/instance.h"
 #include "openthread/tasklet.h"
+#include "openthread/srp_client.h"
 
 /* ---- Lock ---- */
 static SemaphoreHandle_t s_bt_mutex = NULL;

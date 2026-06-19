@@ -24,8 +24,8 @@
         "-I$PROJECT_DIR/lib/libesp32/BearThread/openthread/src/lib/spinel",
         "-I$PROJECT_DIR/lib/libesp32/BearThread/openthread/examples/platforms",
         "-DPACKAGE_VERSION=\\\"BearThread-1.0\\\"",
-        "-DOPENTHREAD_FTD=0",
-        "-DOPENTHREAD_MTD=1",
+        "-DOPENTHREAD_FTD=1",
+        "-DOPENTHREAD_MTD=0",
         "-DOPENTHREAD_RADIO=0",
         "-DOPENTHREAD_PROJECT_CORE_CONFIG_FILE=\\\"bearthread-core-config.h\\\"",
         "-DOPENTHREAD_CONFIG_FILE=\\\"bearthread-core-config.h\\\""

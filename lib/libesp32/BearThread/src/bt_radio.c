@@ -276,8 +276,19 @@ otError otPlatRadioTransmit(otInstance *aInstance, otRadioFrame *aFrame)
     esp_ieee802154_set_channel(aFrame->mChannel);
 
 #if OPENTHREAD_CONFIG_THREAD_VERSION >= OT_THREAD_VERSION_1_2
-    if (aFrame->mInfo.mTxInfo.mIsSecurityProcessed) {
-        otMacFrameSetFrameCounter(aFrame, s_mac_frame_counter++);
+    if (otMacFrameIsSecurityEnabled(aFrame) && !aFrame->mInfo.mTxInfo.mIsSecurityProcessed) {
+        if (!s_transmit_frame.mInfo.mTxInfo.mIsARetx) {
+            otMacFrameSetFrameCounter(aFrame, s_mac_frame_counter++);
+        }
+        if (otMacFrameIsKeyIdMode1(aFrame)) {
+            s_transmit_frame.mInfo.mTxInfo.mAesKey = &s_current_key;
+            if (!s_transmit_frame.mInfo.mTxInfo.mIsARetx) {
+                otMacFrameSetKeyId(aFrame, s_key_id);
+            }
+            esp_ieee802154_get_extended_address(s_security_addr);
+        }
+        memcpy(s_security_key, s_current_key.mKeyMaterial.mKey.m8, sizeof(s_current_key.mKeyMaterial.mKey.m8));
+        esp_ieee802154_set_transmit_security(&aFrame->mPsdu[-1], s_security_key, s_security_addr);
     }
 #endif
 

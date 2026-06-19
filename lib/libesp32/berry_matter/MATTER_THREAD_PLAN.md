@@ -1,165 +1,119 @@
-# Matter Thread Implementation Plan
+# Matter over Thread — Plan v2: Replicate esp-matter `light`
 
-## Goal
-Implement Matter over Thread on Tasmota (ESP32-C6): commissioning (PASE + CASE), operational discovery (SRP/mDNS), and data exchange (Interaction Model over UDP) using Berry as the application layer and BearThread as the Thread transport.
+## Why a new plan
+6 weeks of debugging a hand-rolled Berry SRP/SIG(0)/ECDSA client failed. The
+codebase has since pivoted to OpenThread's **native** SRP client, but
+registration still fails: BLE+PASE+CASE succeed, Thread attaches, an SRP UPDATE
+is sent to the Border Router (BR), but the BR **never responds** and the device
+retransmits forever until commissioning times out.
 
-## Design Overview
+New strategy: stop inventing, **replicate the known-good Espressif esp-matter
+`light` example as closely as possible** (`~/Developer/esp-matter/examples/light`,
+built `c6_thread`). Change one variable at a time against a frozen test setup.
 
-```
-┌────────────────────────────────────────────────┐
-│                  Berry (Tasmota)               │
-│                                                │
-│  Matter_Thread_Device.be                       │
-│    └─ self.srp = matter.SRP_Client()           │
-│         │                                      │
-│         ▼                                      │
-│  Matter_SRP_Client.be                          │
-│    └─ Key set via set_key() from host          │
-│    └─ Server discovery (OT.netdata_services)   │
-│    └─ DNS UPDATE builder + SIG(0)              │
-│    └─ ECDSA signing + low-S normalization      │
-│    └─ State machine + backoff + refresh        │
-│    └─ UDP send/receive (OT.udp_send/poll)      │
-│         │                                      │
-│         ▼                                      │
-│  OT.udp_send / OT.udp_poll                     │
-│         │                                      │
-└─────────┼──────────────────────────────────────┘
-          │
-┌─────────▼────────────────────────────────────────┐
-│              BearThread (C++)                    │
-│                                                  │
-│  bearthread-core-config.h ─ SRP_CLIENT=0,ECDSA=0 │
-└──────────────────────────────────────────────────┘
-```
+## Reference vs. current implementation
 
-### Key design decisions
+| Aspect | esp-matter `light` (works) | Tasmota / BearThread (broken) |
+|--------|----------------------------|-------------------------------|
+| OpenThread source | Espressif IDF OpenThread component | Custom vendored `lib/libesp32/BearThread/openthread` |
+| OT crypto backend | **mbedTLS** | **Custom BearSSL** (`bt_crypto_bearssl.cpp`, `CRYPTO_LIB_PLATFORM`) |
+| SRP client | Native OT (`CONFIG_OPENTHREAD_SRP_CLIENT=y`) | Native OT (`SRP_CLIENT_ENABLE=1`) ✓ aligned |
+| SRP startup | `otSrpClientEnableAutoStartMode()` (CHIP `GenericThreadStackManagerImpl_OpenThread.hpp:730`) | **Manual `otSrpClientStart(&sockAddr)`** with server parsed by hand from Network Data |
+| DNS client | `CONFIG_OPENTHREAD_DNS_CLIENT=y` | `DNS_CLIENT_ENABLE=0` |
+| Device type | FTD (MTD also valid) | MTD |
+| ECDSA key | persisted via OT settings (`otPlatSettings`) | OT settings in `bt_misc.cpp` (LittleFS) — verify it loads before SRP |
+| Hand-rolled SRP | none | **Dead code still present**: `Matter_SRP_Client.be` + `udp_srp_*` bindings |
 
-- **SRP key is separate from NOC** (RFC 9665 §3.2.5.1). Apple mDNSResponder does not cross-check against NOC.
-- **Low-S normalization is pure Berry** (byte-comparison of big-endian integers, post-processing ECDSA output).
-- **SRP key is a compile-time constant** in `Matter_Thread_Device.be:kSrpPriv/kSrpPub` (secp256r1 `bytes("hex")`), passed via `set_key()` — NOT generated at runtime, NOT persisted. (Hardcoded dev key until RNG timing is resolved.)
-- **Hostname**: derived from Tasmota EUI64 (deterministic, not random).
-- **OT types are hidden from the .ino file** — only BearThread C++ files include `<openthread/*>` headers.
-- **All SRP atomic in Berry** — no hybrid C/Berry crypto.
-- **IPv6 string→bytes parsing is done in C**, not Berry — `matter.get_ip_bytes(s)` (in `be_matter_misc.cpp`, uses Arduino `IPAddress::fromString`) returns 16 bytes for IPv6 / 4 bytes for IPv4. Replaced the former hand-rolled Berry `_ipv6_string_to_bytes()`.
-- **SRP transport is raw UDP** (DNS UPDATE), not CoAP. The OT module exposes `udp_open/send/poll/close`.
+### What's already aligned
+- `Matter_Thread_Device.be` drives SRP purely via native `OT.srp_*` bindings
+  (`srp_set_hostname`, `srp_add_service`, `srp_stop`, etc.). It does **not**
+  instantiate `Matter_SRP_Client.be`.
 
-## Related Files
+## Root-cause priority (most → least likely)
 
-### Core Berry implementation
+1. **Manual `otSrpClientStart()` vs auto-start** — `Matter_Thread_Device.be:_start_srp_client()`
+   calls `OT.srp_start(server)` after hand-parsing Network Data. esp-matter/CHIP
+   uses `otSrpClientEnableAutoStartMode()`, letting OT pick the SRP server itself.
+   Manual selection easily targets the wrong address/port (the old `63218`
+   symptom). **Cheapest high-value fix.**
+2. **BearSSL ECDSA SIG(0)** — only the crypto is custom now. A malformed/high-S
+   signature or bad key DER makes the BR silently drop the UPDATE → exactly our
+   symptom. Suspect after #1 is ruled out.
+3. **Response not received / demux** — confirm the BR truly sends nothing on-air
+   vs. the device dropping it (leftover dedicated SRP UDP socket, coex).
+4. **Two SRP paths confusion** — `Matter_SRP_Client.be` + `udp_srp_*` are dead
+   but should be removed to eliminate doubt.
+5. **ECDSA key not persisted across boots** — product correctness; less likely to
+   cause first-boot timeout.
+6. **Custom OT version/wire bug, MTD vs FTD, DNS client disabled** — investigate
+   last; expensive.
+
+## Phased plan
+
+### Phase 0 — Freeze the test matrix (establish ground truth)
+- One BR (Apple/Google), one Thread dataset.
+- **Build and flash esp-matter `light` (`c6_thread`) on the same C6 hardware** and
+  confirm it commissions over Thread on this BR.
+- Capture its successful SRP registration: OT logs (SRP/INFO) and ideally an
+  802.15.4 sniffer trace. This is the **golden reference** for every comparison.
+
+### Phase 1 — Single SRP path (remove dead hand-rolled code)
+- Delete/neutralize `Matter_SRP_Client.be` and the `udp_srp_open/send/poll/close`
+  bindings (driver + `be_OT_lib.c`) so only native OT SRP can run.
+- Confirm logs show native path only (`BT_CRYPTO : ECDSA sign …`, OT SRP callback),
+  no `OT : SRP UDP socket opened`.
+
+### Phase 2 — Match CHIP's SRP startup (auto-start)
+- Replace manual `_start_srp_client()` / `otSrpClientStart(&sockAddr)` with
+  `otSrpClientEnableAutoStartMode(instance, cb, nullptr)` once during OT init,
+  mirroring CHIP `GenericThreadStackManagerImpl_OpenThread.hpp:730`.
+- Keep `otSrpClientSetCallback`, `otSrpClientSetHostName` +
+  `otSrpClientEnableAutoHostAddress`, `otSrpClientAddService`,
+  `otSrpClientSetLeaseInterval(3600)` + `otSrpClientSetKeyLeaseInterval(86400)`.
+- Add a Berry wrapper `OT.srp_enable_autostart()`; keep `netdata_services()` as a
+  diagnostic only.
+- Success: host state → `Registered`; auto-start picks same destination as the
+  esp-matter capture.
+
+### Phase 3 — Fix / replace ECDSA (only if Phase 2 insufficient)
+- First: add **low-S normalization** in `otPlatCryptoEcdsaSign` (`if s > n/2: s = n - s`)
+  and a self-test that verifies the produced signature.
+- Instrument: log SHA-256 digest, pubkey, raw 64-byte `r||s`; verify offline
+  (OpenSSL/mbedTLS).
+- If still failing: reimplement only `otPlatCryptoEcdsa{GenerateKey,GetPublicKey,
+  Sign,Verify}` with **mbedTLS P-256** (Tasmota already links mbedTLS), keeping the
+  same OT formats (keypair DER, raw 64-byte pubkey `X||Y`, raw 64-byte sig `r||s`).
+  This matches esp-matter's crypto and removes the largest remaining unknown.
+
+### Phase 4 — Verify persistence
+- Confirm `bt_misc.cpp` `otPlatSettings*` loads SRP ECDSA key + SLAAC IID before
+  the SRP client runs, and they're stable across reboot; factory reset wipes them.
+
+### Phase 5 — Only if still failing: converge harder on esp-matter
+- Enable `DNS_CLIENT_ENABLE`, try FTD, align BearThread OT config/version with the
+  IDF OpenThread component — or replace BearThread with the IDF component (XL).
+
+## Cheapest diagnostic (do early)
+Capture one Tasmota SRP UPDATE and one esp-matter SRP UPDATE on the same BR and
+diff: dest IPv6/port, DNS UPDATE opcode/zone, EDNS lease option, KEY alg=13,
+SIG RDLENGTH, 64-byte raw signature, and whether the BR replies on-air.
+- BR replies but device misses it → RX/demux/coex.
+- Dest differs from esp-matter → server-selection (Phase 2).
+- Dest same, SIG fails offline → crypto (Phase 3).
+- Dest same, SIG ok, no reply → wire/policy/custom-OT (Phase 5).
+
+## Key files
 | File | Role |
 |------|------|
-| `lib/libesp32/berry_matter/src/embedded/Matter_SRP_Client.be` | Full SRP client: set_key, signing, DNS UPDATE builder, SIG(0) (zero timestamps matching OpenThread, computed key-tag), state machine, server discovery, UDP transport |
-| `Matter_Thread_Device.be` | Orchestrator — creates `self.srp = matter.SRP_Client()` + `set_key(kSrpPriv, kSrpPub)` in `init()` |
-| `lib/libesp32/berry_matter/src/be_matter_misc.cpp` | `matter.get_ip_bytes()` C helper — IP string → raw bytes (IPv6=16, IPv4=4) |
-| `lib/libesp32/berry_tasmota/src/be_OT_lib.c` | OT module registration (20 entries including UDP, CoAP, netdata_services, coex_prefer_thread) |
-| `lib/libesp32/berry/generate/be_fixed_OT.h` | Auto-generated from be_OT_lib.c — do not hand-edit |
-
-### BearThread (C++) — transport only
-| File | Role |
-|------|------|
-| `lib/libesp32/BearThread/include/bearthread-core-config.h` | `SRP_CLIENT_ENABLE=0`, `ECDSA_ENABLE=0` |
-
-### Driver / bindings
-| File | Role |
-|------|------|
-| `tasmota/tasmota_xdrv_driver/xdrv_52_3_berry_thread.ino` | 797 lines: OT bindings (UDP open/send/poll/close, CoAP send/poll, netdata_services, coex_prefer_thread, set_log_level, standard OT). No SRP. |
-
-## Berry Syntax Rules
-
-| Don't | Do |
-|-------|-----|
-| `a if cond else b` | `cond ? a : b` |
-| `s[a:b]` | `s[a..b]` (inclusive both ends) |
-| `None` / `is` | `nil` / `==` |
-| `ClassName.method()` from inside class | `self.method()` |
-| `static def` (not callable via self) | `def` |
-| `bytes(N)` (positive = capacity only) | `bytes(-N)` (fixed N-byte buffer) |
-| `int(hex_str, 16)` (ignores base) | `int("0x" + hex_str)` |
-| Hand-rolled IPv6 string parser in Berry | `matter.get_ip_bytes(s)` C helper |
-
-## State Machine
-
-```
-Stopped → ToAdd → Adding → Registered → ToRefresh → Refreshing → Registered
-                  ↓                              ↓
-               ToAdd (failure)              ToRefresh (failure)
-ToRemove → Removing → Removed
-                                          Any state → Error (internal failure)
-```
+| `Matter_Thread_Device.be` | Orchestrator; native `OT.srp_*`. Change manual start → autostart (Phase 2) |
+| `tasmota/tasmota_xdrv_driver/xdrv_52_3_berry_thread.ino` | OT bindings: `srp_*`, `srp_client_callback`, `otSrpClientStart`; add autostart |
+| `lib/libesp32/berry_tasmota/src/be_OT_lib.c` | OT module registration (+ regen `be_fixed_OT.h`) |
+| `lib/libesp32/BearThread/include/bearthread-core-config.h` | OT config (SRP/ECDSA/DNS/crypto-lib) |
+| `lib/libesp32/BearThread/src/bt_crypto_bearssl.cpp` | BearSSL `otPlatCryptoEcdsa*` — Phase 3 |
+| `lib/libesp32/BearThread/src/bt_misc.cpp` | `otPlatSettings*` persistence — Phase 4 |
+| `lib/libesp32/berry_matter/src/embedded/Matter_SRP_Client.be` | **Dead** hand-rolled SRP — remove (Phase 1) |
+| Reference | `~/Developer/esp-matter/examples/light` + CHIP `GenericThreadStackManagerImpl_OpenThread.hpp` |
 
 ## Build
-- Environment: `tasmota32c6-mi32`, board `esp32c6`, defines `USE_BERRY` + `USE_MATTER_THREAD=1` + `USE_MATTER_DEVICE`
-- Clean build required after config changes: `rm -rf .pio/build/tasmota32c6-mi32 && pio run`
-- `USE_SHA_ROM` is **disabled** (commented out) in `platformio_tasmota32.ini` for this work.
-- `sdkconfig.defaults` was regenerated/expanded (large diff, not SRP-specific).
-
-## SRP DNS-UPDATE / SIG(0) Fixes (current)
-
-Applied to `Matter_SRP_Client.be`:
-
-- **KEY record corrected**: `kProtocolDnsSec = 0` (was 3) and `kKeyFlagsLow = 0x00` (was `0x02`/ZNZ removed).
-- **SIG(0) timestamps are real**: inception/expiration derived from RTC UTC (SetUTCTime now works, see fixes below).
-- **Real SIG(0) key tag**: computed via `_calc_key_tag()` (RFC 4034 Appendix B, 16-bit one's-complement fold over KEY RDATA) (was 0).
-- **OPT pseudo-RR RDLENGTH fixed**: proper 2-byte placeholder written for the Update-Lease OPT record.
-- **Counts before signing (RFC 2931 §2.3)**: UPCOUNT set to real value before signing; ADCOUNT temporarily reduced to 1 (SIG excluded) then restored to 2 after.
-- **Response parsing**: `_on_success` parses rcode from the response header and either marks registered (rcode=0) or calls `_on_failure` with the rcode string. No hex payload dump (log level kept minimal).
-- **Fixed reversed to_sign order (reverted)**: The original `to_sign = sig_rdata + msg[0..sig_owner_off-1]` was correct per RFC 2931 §3.1 (`data = RDATA | request - SIG(0)`). An incorrect inversion to `msg[0..] + sig_rdata` was briefly applied then reverted.
-- **Fixed DER→raw signature**: `_ecdsa_sig_der()` was removed — SIG(0) now writes raw 64-byte r||s per RFC 6605 §4 instead of ASN.1/DER (`0x30 0x44 0x02 0x20...`). `max_sig_size` reduced from 72 to 64.
-- **Fixed int64 division in SetUTCTime**: `Matter_Thread_Device.be:207` — `(t - int64(rtc_utc())) / int64(1000000)` avoids `divzero_error` from Berry int64 library where `/` only accepts int64 operands; int32 silently truncates to 32-bit.
-
-### Known issues / omissions
-
-- **SetUTCTime RTC sync**: `Matter_Thread_Device.be:203-208` handles cluster `0x0038` (Time Synchronization), command `0x0000` (SetUTCTime) by logging the UTC and returning SUCCESS. The int64 crash is fixed (confirmed: RTC shows correct epoch `1781037231`), but the handler never calls `tasmota.cmd("RtcSetUTC ...")`. Wall-clock accuracy depends on the network-provided time.
-- **UDP socket sharing**: Both Matter (data exchange on port 5540) and SRP (port 0) use the same `OT.udp_open()`/`OT.udp_poll()` mechanism. Both poll from the same FreeRTOS queue in `Matter_Thread_Device.every_50ms()`. A late-inbound DNS response could be consumed by the Matter message handler instead of `_drain_responses()`, though in practice the SRP server address differs so messages are demuxed by destination port.
-
-## Current Status (per latest on-device log)
-
-- **BLE commissioning succeeds**: PASE (Pake1/2/3) → CASE (AddNOC, fabric `Apple Home` added) all complete.
-- **Thread attaches**: dataset installed, role → child, OMR address `fd1d:bc81:cb5e:0:830b:3f8:dc64:65ce` assigned, OT UDP up on 5540.
-- **SRP server discovered**: SRP-unicast entry `[fd1d:bc81:cb5e:0:8dee:b696:b381:9bc4]:63218` picked from Network Data.
-- **SRP UPDATE is sent and reaches the BR** (`SRP UDP sent 552/553 bytes`, MeshForwarder confirms 600-byte UDP to the server) **but never gets a response** — SRP stays `Adding running=false`, retransmits forever (msg id 0,1,2,…), and commissioning times out (`-Session (removed)`).
-
-## Root Cause Analysis
-
-Two independent bugs were identified in `SIG(0)` signing:
-
-### Bug 1 (not a bug — original code was correct)
-
-The `to_sign` order was briefly suspected to be reversed. RFC 2931 §3.1 gives:
-```
-data = RDATA | request - SIG(0)   # SIG RDATA first, then DNS message
-```
-The original code at `Matter_SRP_Client.be:1150` was correct:
-```berry
-var to_sign = sig_rdata + msg[0 .. sig_owner_off - 1]
-```
-An incorrect inversion was applied and then reverted.
-
-### Bug 2 (confirmed root cause — DER-encoded signature)
-
-RFC 6605 §4 mandates that ECDSA P-256 SHA-256 signatures in SIG(0) records use **raw 64-byte r||s** format:
-> "The two integers, each of which is formatted as a simple octet string, are combined into a single longer octet string for DNSSEC as the concatenation 'r | s'. For P-256, each integer MUST be encoded as 32 octets."
-
-The code was calling `_ecdsa_sig_der(sig_norm)` which wrapped the 64-byte raw signature in ASN.1/DER (`30 44 02 20...`), producing 70+ bytes. The hex dump of msg_id=0 confirmed:
-```
-RDLENGTH = 0x46 (70 bytes)
-signature = 30 44 02 20 4C B4 EC 0C ... 02 20 50 D0 CF 0F ... DD
-```
-The BR receives DER-encoded bytes, can't parse them as 64-byte r||s, and silently drops the UPDATE.
-
-**Fix applied**: `var sig_der = sig_norm` (skip DER encoding), `max_sig_size` reduced from 72 to 64.
-
-### Additional fix: int64 division in SetUTCTime
-
-`Matter_Thread_Device.be:207`: `(t - int64(rtc_utc())) / int64(1000000)` — Berry's int64 `/` operator only accepts int64 operands; plain `int(rtc_utc())` and `1000000` cause `arg_get_p` to return NULL, raising `divzero_error`. Fixed by promoting both to int64. Logs confirm correct epoch (`1781037231`) after fix.
-
-## Next Steps
-
-1. Build + deploy the raw-signature fix
-2. Check whether the BR now responds to SRP UPDATEs
-3. If still failing, investigate:
-   - Whether `_normalize_low_s` produces incorrect values
-   - Whether the BR needs a different algorithm or key format
-   - Whether the SRP server port/address is correct
-
+- Env `tasmota32c6-mi32`, board `esp32c6`; `USE_BERRY` + `USE_MATTER_DEVICE` + `USE_MATTER_THREAD=1`.
+- Clean build after config changes: `rm -rf .pio/build/tasmota32c6-mi32 && pio run -e tasmota32c6-mi32`.
