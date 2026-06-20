@@ -75,9 +75,9 @@ class Matter_SRP_Client
     static kAlgorithmEcdsaP256Sha256 = 13
     # Key flags: (aUseFlags << 8) | aOwnerFlags in mFlags[0];
     # aSignatoryFlags in low nibble of mFlags[1].
-    # NOC=0 (no confidentiality), ZNZ=0, Signatory=General=1.
-    static kKeyFlagsHigh = 0x00  # NOC, no confidentiality
-    static kKeyFlagsLow  = 0x00
+    # NOC=0 (no confidentiality), ZNZ=2 (non-zone), Signatory=General=1.
+    static kKeyFlagsHigh = 0x02  # Use(0) | Owner(2) = kAuthConfidPermitted | kOwnerNonZone
+    static kKeyFlagsLow  = 0x01  # kSignatoryFlagGeneral
     static kSignatoryGeneral = 0x01
 
     # Update Lease OPT option code
@@ -138,6 +138,7 @@ class Matter_SRP_Client
     var last_response         # "ok" / "timeout" / "error" / "noerror" (RCODE text)
     var last_error_logged     # int ms - throttle error logging
     var started               # bool
+    var udp_srp_open          # bool - dedicated SRP UDP socket is open
 
     #########################################################################
     # Constructor
@@ -160,6 +161,7 @@ class Matter_SRP_Client
         self.last_response = ""
         self.last_error_logged = 0
         self.started = false
+        self.udp_srp_open = false
     end
 
     #########################################################################
@@ -247,7 +249,7 @@ class Matter_SRP_Client
     end
 
     # Forcefully stop the SRP client. Resets to kStateStopped, clears
-    # hostname and services. Does NOT close the shared UDP socket.
+    # hostname and services. Also closes the dedicated SRP UDP socket.
     def stop()
         if self.state == self.kStateStopped
             return
@@ -259,6 +261,11 @@ class Matter_SRP_Client
         self.server_addr = nil
         self.last_attempt_ms = 0
         self.backoff_ms = self.kInitialBackoffMs
+        if self.udp_srp_open
+            import OT
+            OT.udp_srp_close()
+            self.udp_srp_open = false
+        end
     end
 
     # Read-only accessors
@@ -366,13 +373,16 @@ class Matter_SRP_Client
     #########################################################################
     def _pick_server()
         # OT.netdata_services() returns human-readable descriptor strings, e.g.
+        #   "id=1 ent=44970 rloc=0xfc11 stable=1 kind=SRP-anycast sd=5C0A \
+        #    svr= seq=10"
         #   "id=2 ent=44970 rloc=0xfc12 stable=1 kind=SRP-unicast sd=5D \
-        #    svr=FD1D... [fd1d:bc81:cb5e:0:9c2c:bb11:ffe1:2398]:64970"
-        #   "id=1 ent=44970 rloc=0xfc11 stable=1 kind=SRP-anycast sd=5C09 \
-        #    svr= seq=9"
-        # The unicast entry carries an explicit "[addr]:port" tail. The anycast
-        # entry carries only the server RLOC16, from which we derive the ALOC
-        # "<mesh-local-prefix>:0:ff:fe00:<rloc16>".
+        #    svr=FD1D... [fd1d:bc81:cb5e:0:9c2c:bb11:ffe1:2398]:63218"
+        # We prefer the anycast entry's RLOC16 because that matches the
+        # OpenThread C-side SRP client behaviour (it discovers the server via
+        # OT platform network data and resolves to the anycast advertiser's
+        # RLOC).  The unicast entry carries an explicit "[addr]:port" tail
+        # (the infrastructure ULA), which is ignored — only the RLOC16 and
+        # port are used.
         import string
         try
             import OT
@@ -380,7 +390,8 @@ class Matter_SRP_Client
             if services == nil
                 return nil
             end
-            var anycast_rloc = nil
+            var unicast_rloc = nil
+            var unicast_port = nil
             var i = 0
             while i < size(services)
                 var s = services[i]
@@ -388,34 +399,41 @@ class Matter_SRP_Client
                 if type(s) != "string" || size(s) == 0
                     continue
                 end
-                # Prefer unicast: extract the explicit "[addr]:port" tail.
-                if string.find(s, "SRP-unicast") >= 0
-                    var lb = string.find(s, "[")
-                    var rb = string.find(s, "]:")
-                    if lb >= 0 && rb > lb
-                        var addr = s[lb + 1 .. rb - 1]
-                        var port = int(s[rb + 2 .. size(s) - 1])
-                        if size(addr) > 0 && port > 0
+                # Anycast: use the advertiser RLOC16 + default SRP port.
+                # The C-side client detects the server via OT network data
+                # and arrives at the anycast entry's RLOC (e.g. 0xfc11).
+                if string.find(s, "SRP-anycast") >= 0
+                    var rp = string.find(s, "rloc=0x")
+                    if rp >= 0
+                        var rloc16 = s[rp + 7 .. rp + 10]   # 4 hex chars
+                        var addr = self._aloc_from_rloc(rloc16)
+                        if addr != nil
                             self.server_addr = addr
-                            self.server_port = port
+                            # Anycast SRP server always listens on port 53
+                            # (OpenThread kAnycastServerPort / kAnycastAddressModePort).
+                            self.server_port = 53
+                            log(format("MTR: SRP server RLOC %s:%i", addr, self.server_port), 2)
                             return addr
                         end
                     end
-                # Remember the first anycast entry as a fallback.
-                elif string.find(s, "SRP-anycast") >= 0 && anycast_rloc == nil
+                # Remember the first unicast entry as a fallback.
+                elif string.find(s, "SRP-unicast") >= 0 && unicast_rloc == nil
                     var rp = string.find(s, "rloc=0x")
-                    if rp >= 0
-                        anycast_rloc = s[rp + 7 .. rp + 10]   # 4 hex chars
+                    var rb = string.find(s, "]:")
+                    if rp >= 0 && rb >= 0
+                        unicast_rloc = s[rp + 7 .. rp + 10]   # 4 hex chars
+                        unicast_port = int(s[rb + 2 .. size(s) - 1])
                     end
                 end
             end
-            # No unicast entry: build the anycast ALOC from the RLOC16.
-            if anycast_rloc != nil
-                var aloc = self._aloc_from_rloc(anycast_rloc)
-                if aloc != nil
-                    self.server_addr = aloc
-                    self.server_port = 53
-                    return aloc
+            # No anycast entry: fall back to the unicast entry's RLOC + port.
+            if unicast_rloc != nil && unicast_port != nil && unicast_port > 0
+                var addr = self._aloc_from_rloc(unicast_rloc)
+                if addr != nil
+                    self.server_addr = addr
+                    self.server_port = unicast_port
+                    log(format("MTR: SRP server RLOC %s:%i (unicast fallback)", addr, self.server_port), 2)
+                    return addr
                 end
             end
         except .. as e, m
@@ -473,10 +491,17 @@ class Matter_SRP_Client
             return
         end
 
-        # Send via UDP (DNS UPDATE)
+        # Open dedicated SRP socket if not yet open
+        if !self.udp_srp_open
+            import OT
+            OT.udp_srp_open()
+            self.udp_srp_open = true
+        end
+
+        # Send via dedicated SRP UDP socket
         try
             import OT
-            OT.udp_send(self.server_addr, self.server_port, msg)
+            OT.udp_srp_send(self.server_addr, self.server_port, msg)
             var sent_id = self.msg_id
             self.msg_id = (self.msg_id + 1) & self.kMsgIdMax
             self.last_attempt_ms = tasmota.millis()
@@ -494,7 +519,7 @@ class Matter_SRP_Client
                 end
             end
         except .. as e, m
-            log(format("MTR: SRP udp_send FAILED: %s %s", str(e), str(m)), 2)
+            log(format("MTR: SRP srp_send FAILED: %s %s", str(e), str(m)), 2)
             self._on_failure("send")
         end
     end
@@ -503,7 +528,7 @@ class Matter_SRP_Client
         try
             import OT
             while true
-                var resp = OT.udp_poll()
+                var resp = OT.udp_srp_poll()
                 if resp == nil
                     return
                 end
@@ -515,7 +540,7 @@ class Matter_SRP_Client
                     if tasmota.loglevel(3)
                         log(format("MTR: SRP recv skip (port %i != %i)", resp[2], self.server_port), 3)
                     end
-                    break   # not an SRP response, leave remaining packets for Matter handler
+                    continue   # skip non-SRP packet, drain remaining
                 end
                 var payload = resp[0]
                 self._on_success(payload)
@@ -1032,22 +1057,13 @@ class Matter_SRP_Client
         self._rr_set_rdlength(msg, key_data_off)
         update_record_count += 1
 
-        # Compute key tag for SIG(0) from KEY RDATA (RFC 4034 Appendix B)
-        var key_tag_bytes = bytes()
-        key_tag_bytes.add(self.kKeyFlagsHigh)
-        key_tag_bytes.add(self.kKeyFlagsLow)
-        key_tag_bytes.add(self.kProtocolDnsSec)
-        key_tag_bytes.add(self.kAlgorithmEcdsaP256Sha256)
-        key_tag_bytes .. self.key_pub
-        var key_tag = self._calc_key_tag(key_tag_bytes)
-
         # 4. Additional section
         # 4a. OPT (Update Lease option)
         # OPT has root name (empty) + type=OPT, class=udpsize, ttl=0, rdlen=N
         msg.add(0x00)  # root name
         msg.add(0); msg.add(self.kTypeOpt)
         msg.add((self.kUdpPayloadSize >> 8) & 0xFF); msg.add(self.kUdpPayloadSize & 0xFF)
-        msg.add(0); msg.add(0); msg.add(0); msg.add(0)  # TTL
+        msg.add(0); msg.add(0); msg.add(0x80); msg.add(0)  # TTL with DO bit
         # RDLENGTH placeholder (2 bytes, filled below)
         var rdlen_off = size(msg)
         msg.add(0); msg.add(0)
@@ -1091,22 +1107,14 @@ class Matter_SRP_Client
         msg.add(0)
         # original TTL = 0
         msg.add(0); msg.add(0); msg.add(0); msg.add(0)
-        # Use wall clock if available (SetUTCTime feeds tasmota.cmd("time ...")),
-        # otherwise fall back to a synthetic epoch from uptime.
-        var utc_now = tasmota.rtc("utc")
-        if utc_now == nil || utc_now == 0
-            utc_now = tasmota.millis() / 1000 + 1700000000
-        end
-        var inception = utc_now
-        var expire = self.lease_sec
-        if expire < 300   expire = 300   end
-        var expiration = inception + expire
-        msg.add((expiration >> 24) & 0xFF); msg.add((expiration >> 16) & 0xFF)
-        msg.add((expiration >> 8) & 0xFF);  msg.add(expiration & 0xFF)
-        msg.add((inception >> 24) & 0xFF);  msg.add((inception >> 16) & 0xFF)
-        msg.add((inception >> 8) & 0xFF);   msg.add(inception & 0xFF)
-        # key tag from KEY RDATA (RFC 4034 Appendix B)
-        msg.add((key_tag >> 8) & 0xFF); msg.add(key_tag & 0xFF)
+        # OpenThread sets SIG timestamps to zero (sig.Clear()) because end
+        # devices may lack a synchronized clock. The SRP server also does NOT
+        # verify timestamps per OpenThread source (srp_server.cpp:1423).
+        # Match this behavior to avoid any clock-skew rejection on the BR.
+        msg.add(0); msg.add(0); msg.add(0); msg.add(0)  # expiration = 0
+        msg.add(0); msg.add(0); msg.add(0); msg.add(0)  # inception  = 0
+        # key tag = 0 (matches OpenThread sig.Clear())
+        msg.add(0); msg.add(0)
         # signer's name in canonical (uncompressed) form: <hostname>.default.service.arpa.
         var signer_name_off = size(msg)
         msg.add(size(self.hostname)); msg .. self.hostname
@@ -1170,6 +1178,11 @@ class Matter_SRP_Client
             raise "internal_error", "ECDSA sign returned nil"
         end
         var sig_norm = self._normalize_low_s(sig_raw)
+        # TEMPORARY DEBUG: log digest + signature + pubkey for offline SIG(0) verification
+        if tasmota.loglevel(3)
+            var sig_digest = crypto.SHA256().update(to_sign).out()
+            log(format("MTR: SRP SIG digest=%s sig=%s pubkey=%s", sig_digest.tohex(), sig_norm.tohex(), self.key_pub.tohex()), 3)
+        end
         # Use raw 64-byte r||s format per RFC 6605 §4 (not DER-encoded ASN.1)
         var sig_der = sig_norm
         var sig_len = max_sig_size
@@ -1184,9 +1197,12 @@ class Matter_SRP_Client
         end
         # Truncate to exact size (placeholder was 64 bytes, we use sig_len)
         msg.resize(sig_placeholder_off + sig_len)
-        # Update SIG RDLENGTH to actual length
-        msg[sig_rdlen_off]     = (sig_len >> 8) & 0xFF
-        msg[sig_rdlen_off + 1] = sig_len & 0xFF
+        # Update SIG RDLENGTH to the full RDATA length (fixed fields + signer
+        # name + signature), NOT just the signature length. RDLENGTH covers
+        # everything from sig_rdata_off to the end of the record.
+        var sig_rdlen = size(msg) - sig_rdata_off
+        msg[sig_rdlen_off]     = (sig_rdlen >> 8) & 0xFF
+        msg[sig_rdlen_off + 1] = sig_rdlen & 0xFF
 
         # Restore ADCOUNT to 2 (now SIG is included)
         msg[addtl_count_off]     = 0

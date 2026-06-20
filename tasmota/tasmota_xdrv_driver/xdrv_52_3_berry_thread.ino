@@ -664,9 +664,14 @@ static void ot_udp_receive_callback(void *aContext, void *aMessage, const void *
   if (!OT_State.udp_rx_queue) return;
 
   static ot_udp_rx_packet_t pkt;
+  static uint32_t s_udp_rx_count = 0;
+  s_udp_rx_count++;
   pkt.len = otMessageRead(msg, offset, pkt.data, length);
   otIp6AddressToString(&info->mPeerAddr, pkt.addr, sizeof(pkt.addr));
   pkt.port = info->mPeerPort;
+
+  AddLog(LOG_LEVEL_INFO, PSTR("OT : UDP rx #%u len=%u from [%s]:%u"),
+         s_udp_rx_count, length, pkt.addr, info->mPeerPort);
 
   if (xQueueSend(OT_State.udp_rx_queue, &pkt, 0) != pdTRUE) {
     AddLog(LOG_LEVEL_DEBUG, PSTR("OT : UDP rx queue full, dropped"));
