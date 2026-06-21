@@ -34,23 +34,65 @@ current key, and call `esp_ieee802154_set_transmit_security()` before transmit.
 
 ---
 
-## Current status
+## Current status (2025-06-20)
 
 | Stage | Status |
 |-------|--------|
 | BLE PASE commissioning | ✓ |
 | Thread attach (child) | ✓ |
 | SRP registration (`_matter._tcp`) | ✓ |
-| CASE session over Thread | **✗** — times out after 90s |
-| Full Matter commissioning | **✗** |
+| CASE session over Thread | ✓ |
+| Full Matter commissioning | ✓ |
 
-SRP works for the first time ever. The remaining blocker is CASE: the
-commissioner (phone) disconnects BLE after provisioning the Thread dataset
-and expects to reach the device over Thread via the Apple TV border router.
-The device is on the network (child, SRP registered, UDP port 5540 open,
-`candidate fabric present`) but CASE fails within 90 s.
+### Root cause of CASE failure — `coex_prefer_thread(true)` killed BLE
 
-This is likely a **Matter‑layer / transport issue**, not crypto or radio.
+After SRP was fixed, CASE still failed because **no UDP packets ever arrived**
+on port 5540. The commissioner never attempted CASE over Thread.
+
+Timeline of the bug:
+
+```
+ConnectNetwork received over BLE
+  → provision_thread_network() calls OT.start()
+  → provision_thread_network() calls OT.coex_prefer_thread(true)   ← BUG
+  → 802.15.4 radio set to HIGH priority → starves BLE
+  → ~0.9 s later BLE disconnects
+  → ConnectNetworkResponse deferred until Thread attaches (~5 s later)
+  → By then BLE is dead → response silently dropped (ble_ready == false)
+  → Commissioner never gets ConnectNetworkResponse
+  → Never proceeds to operational discovery / CASE
+  → Device waits forever, "OT UDP poll alive (no packets)"
+```
+
+**Fix (two parts in `Matter_Thread_Device.be`):**
+
+1. **Removed `coex_prefer_thread(true)` from `provision_thread_network()`.**
+   The coex bias to Thread was only needed once the device is on the network,
+   not during network attachment. The `ot_state_changed()` handler already
+   sets coex at role=child, which is after ConnectNetworkResponse is sent.
+
+2. **Respond to ConnectNetwork immediately instead of deferring.**
+   The old code deferred the response until Thread attached (5 s delay).
+   The new code sends `{Success, "thread provisioning started"}` right away,
+   over the still‑alive BLE link. The commissioner then finds the device
+   via DNS‑SD / SRP and establishes CASE asynchronously.
+
+Without these two changes, the ESP32‑C6's shared 2.4 GHz radio starves BLE
+whenever 802.15.4 gets high coexistence priority — even before Thread has
+attached — making the BLE transport unreliable for any operation that spans
+the Thread‑startup window.
+
+### What's working now
+
+- Full commissioning flow over Thread (Apple TV BR, iPhone commissioner):
+  1. BLE PASE (FFF6 service)
+  2. AddOrUpdateThreadNetwork
+  3. ConnectNetwork → immediate response over BLE
+  4. Device joins Thread, attaches as child
+  5. SRP registers `_matter._tcp` (native OT client, auto-address mode)
+  6. Commissioner discovers via DNS‑SD / BR proxy
+  7. CASE session established over Thread/UDP port 5540
+  8. All subsequent Matter operation over Thread
 
 ---
 
@@ -73,20 +115,23 @@ SRP but are now part of the current build:
 
 ## Future direction
 
-Two independent tracks:
+Now that full commissioning works over Thread, two tracks remain:
 
-### A. Fix CASE commissioning (current)
-Investigate why the commissioner can't establish a CASE session over Thread
-after BLE drops. Possible causes:
-- Phone app not switching to Thread/BR for IPv6
-- Matter stack not responding to CASE messages on UDP port 5540
-- Missing routing / BR forwarding
+### A. Clean up debug diagnostics
+The current build has diagnostic overhead added during the CASE investigation:
+- `every_50ms()` heartbeat log every 5 s
+- Unconditional UDP recv log at INFO level
+- UDP RX packet counter + INFO log in C callback
+
+These should be removed or demoted to DEBUG level once the fix is confirmed
+stable across reboots / power cycles.
 
 ### B. Re‑enable BearSSL + Berry SRP (long‑term)
 Goal: eliminate libs that matter‑device can't distribute.
 - **BearSSL crypto** — restore `CRYPTO_LIB_PLATFORM` and `bt_crypto_bearssl.cpp`
   (currently `#if 0`). The MAC‑layer radio bug was the real problem; BearSSL
-  crypto was a red herring.
+  crypto was a red herring. HMAC override (`bt_hmac_mbedtls.cpp`) and ECDSA
+  shim (`bt_mbedtls_ecdsa_det.c`) become unnecessary.
 - **Berry SRP** — the hand‑rolled `Matter_SRP_Client.be` is dead but the
   plan was always to go back to it after a working reference was established.
   The native OT path now serves as that reference.

@@ -41,6 +41,7 @@ BE_FUNC_CTYPE_DECLARE(be_OT_factory_reset, "", "@");
 extern int be_OT_netdata_services(bvm *vm);
 extern int be_OT_set_log_level(bvm *vm);
 extern int be_OT_coex_prefer_thread(bvm *vm);
+extern int be_OT_radio_reclaim(bvm *vm);
 extern int be_OT_poll_state(bvm *vm);
 
 extern int be_OT_udp_open(bvm *vm);
@@ -56,9 +57,6 @@ extern int be_OT_udp_srp_poll(bvm *vm);
 
 extern void be_OT_udp_srp_close(struct bvm *vm);
 BE_FUNC_CTYPE_DECLARE(be_OT_udp_srp_close, "", "@");
-
-extern int be_OT_coap_send_request(bvm *vm);
-extern int be_OT_coap_poll_response(bvm *vm);
 
 extern int be_OT_srp_set_hostname(bvm *vm);
 extern int be_OT_srp_add_service(bvm *vm);
@@ -89,6 +87,7 @@ module OT (scope: global) {
   netdata_services, func(be_OT_netdata_services)
   set_log_level,  func(be_OT_set_log_level)
   coex_prefer_thread, func(be_OT_coex_prefer_thread)
+  radio_reclaim,  func(be_OT_radio_reclaim)
   udp_open,       func(be_OT_udp_open)
   udp_send,       func(be_OT_udp_send)
   udp_poll,       func(be_OT_udp_poll)
@@ -97,8 +96,6 @@ module OT (scope: global) {
   udp_srp_send,   func(be_OT_udp_srp_send)
   udp_srp_poll,   func(be_OT_udp_srp_poll)
   udp_srp_close,  ctype_func(be_OT_udp_srp_close)
-  coap_send_request,   func(be_OT_coap_send_request)
-  coap_poll_response,  func(be_OT_coap_poll_response)
   srp_set_hostname, func(be_OT_srp_set_hostname)
   srp_add_service,  func(be_OT_srp_add_service)
   srp_remove_service, func(be_OT_srp_remove_service)

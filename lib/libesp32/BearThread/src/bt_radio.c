@@ -87,6 +87,12 @@ static void set_event(uint8_t event)
     assert(ret == sizeof(event_write));
 }
 
+static bool s_radio_initialized = false;
+static uint16_t s_panid;
+static uint8_t s_extaddr[8];
+static uint16_t s_shortaddr;
+static uint8_t s_channel;
+
 static inline void clr_event(uint8_t event) { s_txrx_events &= ~event; }
 static inline bool get_event(uint8_t event) { return s_txrx_events & event; }
 
@@ -115,7 +121,21 @@ esp_err_t bt_radio_init(void)
     esp_ieee802154_set_promiscuous(false);
     esp_ieee802154_set_rx_when_idle(true);
 
+    s_radio_initialized = true;
+
     return ESP_OK;
+}
+
+void bt_radio_reclaim(void)
+{
+    if (!s_radio_initialized) return;
+    esp_ieee802154_enable();
+    esp_ieee802154_set_panid(s_panid);
+    esp_ieee802154_set_extended_address(s_extaddr);
+    esp_ieee802154_set_short_address(s_shortaddr);
+    esp_ieee802154_set_rx_when_idle(true);
+    esp_ieee802154_set_channel(s_channel);
+    esp_ieee802154_receive();
 }
 
 void bt_radio_deinit(void)
@@ -125,6 +145,7 @@ void bt_radio_deinit(void)
         s_radio_event_fd = -1;
     }
     esp_ieee802154_disable();
+    s_radio_initialized = false;
 }
 
 void bt_radio_update(fd_set *read_fds, int *max_fd)
@@ -211,16 +232,19 @@ void otPlatRadioGetIeeeEui64(otInstance *aInstance, uint8_t *aIeeeEui64)
 
 void otPlatRadioSetPanId(otInstance *aInstance, uint16_t panid)
 {
+    s_panid = panid;
     esp_ieee802154_set_panid(panid);
 }
 
 void otPlatRadioSetExtendedAddress(otInstance *aInstance, const otExtAddress *aAddress)
 {
+    memcpy(s_extaddr, aAddress->m8, 8);
     esp_ieee802154_set_extended_address(aAddress->m8);
 }
 
 void otPlatRadioSetShortAddress(otInstance *aInstance, uint16_t aAddress)
 {
+    s_shortaddr = aAddress;
     esp_ieee802154_set_short_address(aAddress);
 }
 
@@ -259,6 +283,7 @@ otError otPlatRadioSleep(otInstance *aInstance)
 
 otError otPlatRadioReceive(otInstance *aInstance, uint8_t aChannel)
 {
+    s_channel = aChannel;
     esp_ieee802154_set_channel(aChannel);
     esp_ieee802154_receive();
     return OT_ERROR_NONE;

@@ -1,8 +1,6 @@
 # Matter Thread Device with BLE commissioning
-import BLE
 import OT
 import matter
-var cbuf = bytes(-255)
 
 # NOTE: The BTP (Bluetooth Transport Protocol) implementation now lives in
 # upstream Matter_BTP.be as matter.BTP, guarded by #if USE_MI_EXT_GUI.
@@ -178,6 +176,10 @@ class Matter_Plugin_Root_Thread : matter.Plugin_Root
                 self.device.thread_dataset = nil
                 import OT
                 OT.stop()
+                # FUTURE: also clear OT's Active Dataset from /ot_settings.bin
+                # via otDatasetSetActiveTlvs() with an empty dataset, so the
+                # device doesn't try to rejoin on next reboot if the fabric
+                # was not also removed.
                 log("MTR: RemoveNetwork Thread dataset cleared", 2)
                 var rmresp = TLV.Matter_TLV_struct()
                 rmresp.add_TLV(0, 0x04 #-TLV.U1-#, 0x00)
@@ -233,6 +235,9 @@ class MATTER_THREAD : matter.Device
     var case_grace_until               # int millis: deadline to wait for CASE after AddNOC (nil = not started)
     var packets_sent                   # list: OT UDP packets awaiting ack (retransmission)
     var ble_serv_cb                    # held reference to cb.gen_cb closure for BLE.serv_cb (must outlive GC)
+    var pending_radio_reclaim
+    var wifi_was_up                       # bool: last known WiFi state (for detecting OFF transitions)
+    var ble_cbuf                          # bytes: BLE callback buffer (nil if BLE unavailable)
     # No srp field — SRP is driven via native OT.srp_* API (OT SRP client with BearSSL ECDSA)
 
     # Override autoconf to use Thread Root plugin instead of WiFi Root plugin.
@@ -283,7 +288,7 @@ class MATTER_THREAD : matter.Device
     def init()
         import global
         if global.matter_device
-            tasmota.remove_driver(global.matter_device)
+            global.matter_device.stop()
             global.matter_device = self
             tasmota.gc()
         end
@@ -302,7 +307,7 @@ class MATTER_THREAD : matter.Device
         self.tick = 0
         self.message_handler = matter.MessageHandler(self)
         self.events = matter.EventHandler(self)
-        tasmota.cmd("wifi 0")
+        self.pending_radio_reclaim = false
         self.autoconf_device()
         tasmota.add_driver(self)
 
@@ -325,35 +330,40 @@ class MATTER_THREAD : matter.Device
 
         var commissioned = self.sessions.count_active_fabrics() > 0
         if commissioned
-            # Already commissioned — rejoin Thread, no BLE needed
+            # Already commissioned — rejoin Thread, no BLE needed.
+            # OT already loaded the Active Dataset from /ot_settings.bin
+            # during otInstanceInitSingle() (called by import OT).
             try
-                import OT, persist
-                if persist.has('ot_dataset')
-                    self.thread_dataset = persist.ot_dataset
-                    OT.set_dataset(self.thread_dataset)
-                    OT.start()
-                    log("MTR: Thread dataset restored, rejoining network", 2)
-                else
-                    log("MTR: WARNING commissioned but no persisted Thread dataset!", 2)
-                end
+                import OT
+                OT.start()
+                log("MTR: Thread dataset restored from OT settings, rejoining network", 2)
             except .. as e, m
                 log(format("MTR: Thread rejoin FAILED: %s %s", str(e), str(m)), 2)
             end
             log("MTR: already commissioned, skipping BLE advertising", 2)
         else
             # Not commissioned — set up BLE GATT for commissioning
-            import cb
-            # Hold the closure on self so it survives GC for the lifetime of BLE.serv_cb.
-            self.ble_serv_cb = cb.gen_cb(/e,o,u,h->self.cb(e,o,u,h))
-            BLE.serv_cb(self.ble_serv_cb, cbuf)
-            self.current_func = /->self.init_C1()
-            BLE.set_svc("FFF6")
-            self.btp = matter.BTP(self)
-            self.commissioning.init_basic_commissioning()
-            tasmota.add_fast_loop(/-> BLE.loop())
-            self.init_light()
-            self.ble_ready = true
-            log(format("MTR: start MATTER Thread+BLE commissionee, discriminator:%i", self.root_discriminator), 1)
+            self.ble_ready = false
+            try
+                import BLE
+                self.ble_cbuf = bytes(-255)
+                import cb
+                self.ble_serv_cb = cb.gen_cb(/e,o,u,h->self.cb(e,o,u,h))
+                BLE.serv_cb(self.ble_serv_cb, self.ble_cbuf)
+                self.current_func = /->self.init_C1()
+                BLE.set_svc("FFF6")
+                self.btp = matter.BTP(self)
+                self.commissioning.init_basic_commissioning()
+                tasmota.cmd("wifi 0")
+                self.pending_radio_reclaim = true
+                tasmota.add_fast_loop(/-> BLE.loop())
+                self.init_light()
+                self.ble_ready = true
+                log(format("MTR: start MATTER Thread+BLE commissionee, discriminator:%i", self.root_discriminator), 1)
+            except .. as e, m
+                log(format("MTR: BLE init FAILED — device cannot be commissioned via BLE: %s %s", str(e), str(m)), 2)
+                self.ble_serv_cb = nil
+            end
         end
     end
 
@@ -386,16 +396,6 @@ class MATTER_THREAD : matter.Device
             if !self.thread_connected
                 self.thread_connected = true
                 log("MTR: Thread network attached", 2)
-                # Phase-aware coex: bias 2.4 GHz to 802.15.4 BEFORE starting
-                # SRP so the first UPDATE is sent while Thread has priority.
-                # The C6 default favours BLE which causes operational-phase
-                # 802.15.4 frames (SRP UPDATE, MLE, CASE) to silently lose
-                # arbitration during the few seconds before BTP closes.
-                try
-                    OT.coex_prefer_thread(true)
-                except .. as e, m
-                    log(format("MTR: coex_prefer_thread(true) FAILED: %s %s", str(e), str(m)), 2)
-                end
                 self.start()
                 # If commissioning window is open, announce PASE via SRP
                 if self.commissioning.is_commissioning_open()
@@ -418,8 +418,10 @@ class MATTER_THREAD : matter.Device
         OT.udp_open(self.UDP_PORT)
         self.packets_sent = []
         # Start native OT SRP client (discovers server from netdata,
-        # sets hostname, starts client, re-adds services)
+        # sets hostname, starts client)
         self._start_srp_client()
+        # Re-register operational discovery services for all active fabrics
+        self.srp_announce_hostnames()
         # Log SRP state shortly after start so we can see if SRP server was found
         tasmota.set_timer(2000, /-> self._log_srp_state())
         tasmota.set_timer(8000, /-> self._log_srp_state())
@@ -480,7 +482,6 @@ class MATTER_THREAD : matter.Device
         self.started = false
     end
 
-    # Override: prevent flush_socket during network transitions
     def network_down()
     end
 
@@ -568,12 +569,12 @@ class MATTER_THREAD : matter.Device
     ###########################################################
     def parse()
         var msg = self.btp
-        var is_synced = msg.parse(cbuf[1..cbuf[0]])
+        var is_synced = msg.parse(self.ble_cbuf[1..self.ble_cbuf[0]])
         if !(msg.flags & matter.BTP.F_HANDSHAKE) && msg.combined_payload
             if (msg.flags & matter.BTP.F_END)
                 if size(msg.combined_payload) == 0  return end
                 if is_synced
-                    log(format("BLE: <<< %i bytes", cbuf[0]))
+                    log(format("BLE: <<< %i bytes", self.ble_cbuf[0]))
                     self.message_handler.msg_received(msg.combined_payload, "BLE", 0)
                 end
                 msg.delete()
@@ -590,12 +591,14 @@ class MATTER_THREAD : matter.Device
     # BLE GATT send
     ###########################################################
     def ble_send(payload)
-        cbuf[0] = size(payload)
-        cbuf.setbytes(1,payload)
+        import BLE
+        if self.ble_cbuf == nil   return end
+        self.ble_cbuf[0] = size(payload)
+        self.ble_cbuf.setbytes(1,payload)
         BLE.set_chr("18EE2EF5-263D-4559-959F-4F9C429F9D12")
         BLE.run(211, true)
         self.ble_ready = false
-        log(format("BLE: >>> %i bytes", cbuf[0]))
+        log(format("BLE: >>> %i bytes", self.ble_cbuf[0]))
         self.then(/->self.wait())
         tasmota.defer(/->self.heart_beat())
         return true
@@ -605,29 +608,19 @@ class MATTER_THREAD : matter.Device
     # BLE GATT event callback
     ###########################################################
     def cb(error,op,uuid,handle)
+        if self.ble_cbuf == nil   return end
         if op == 201
-            log(format("BLE: Handles created: %s", cbuf[1..cbuf[0]].tohex()))
+            log(format("BLE: Handles created: %s", self.ble_cbuf[1..self.ble_cbuf[0]].tohex()))
         elif op == 222
             self.parse()
         elif op == 224 || op == 225
             log(format("BLE: Subscribed to %s", op == 224 ? "notification" : "indication"))
             self.next_func = /->self.handshake_ack()
         elif op == 227
-            log(format("BLE: peer MAC: %s", cbuf[1..cbuf[0]].tohex()))
+            log(format("BLE: peer MAC: %s", self.ble_cbuf[1..self.ble_cbuf[0]].tohex()))
         elif op == 228
             log("BLE: Disconnected")
             self.check_if_commissioned = true
-            # Phase-aware coex: BLE is gone. If Thread is up, bias the
-            # 2.4 GHz radio toward 802.15.4 so SRP/CASE traffic survives.
-            # On C6 the default coex policy favours BLE; leaving it that
-            # way after BLE has closed needlessly throttles Thread RX.
-            if self.thread_connected
-                try
-                    OT.coex_prefer_thread(true)
-                except .. as e, m
-                    log(format("MTR: coex_prefer_thread(true) FAILED: %s %s", str(e), str(m)), 2)
-                end
-            end
         elif op == 229
             self.ble_ready = true
             log("BLE: stack ready")
@@ -642,41 +635,49 @@ class MATTER_THREAD : matter.Device
     # BLE GATT service setup (Matter FFF6 service)
     ###########################################################
     def init_C1()
+        import BLE
+        if self.ble_cbuf == nil   return end
         BLE.set_chr("18EE2EF5-263D-4559-959F-4F9C429F9D11")
-        cbuf.setbytes(0,bytes("0100"))
+        self.ble_cbuf.setbytes(0,bytes("0100"))
         BLE.run(211,true, 8)
         self.then(/->self.init_C2())
     end
 
     def init_C2()
+        import BLE
+        if self.ble_cbuf == nil   return end
         BLE.set_chr("18EE2EF5-263D-4559-959F-4F9C429F9D12")
-        cbuf.setbytes(0,bytes("0100"))
+        self.ble_cbuf.setbytes(0,bytes("0100"))
         BLE.run(211,true,32)
         self.then(/->self.add_ScanResp())
     end
 
     def add_ADV()
+        import BLE
+        if self.ble_cbuf == nil   return end
         var descriptor = bytes("05025000A000")
-        cbuf.setbytes(0,descriptor)
+        self.ble_cbuf.setbytes(0,descriptor)
         BLE.run(232)
         var payload = bytes("0201060B16F6FF00")
         payload.add(self.root_discriminator,2)
         payload.add(self.VENDOR_ID, 2)
         payload.add(self.PRODUCT_ID, 2)
         payload.add(0x00)
-        cbuf[0] = size(payload)
-        cbuf.setbytes(1,payload)
+        self.ble_cbuf[0] = size(payload)
+        self.ble_cbuf.setbytes(1,payload)
         BLE.run(201)
         self.then(/->self.wait())
         log("BLE: advertising Matter accessory")
     end
 
     def add_ScanResp()
+        import BLE
+        if self.ble_cbuf == nil   return end
         var local_name = "Tasmota Matter"
         var payload = bytes("0201060008") + bytes().fromstring(local_name)
         payload[3] = size(local_name) + 1
-        cbuf[0] = size(payload)
-        cbuf.setbytes(1,payload)
+        self.ble_cbuf[0] = size(payload)
+        self.ble_cbuf.setbytes(1,payload)
         BLE.run(202)
         self.then(/->self.add_ADV())
     end
@@ -789,23 +790,7 @@ class MATTER_THREAD : matter.Device
         except .. as e, m
             log(format("MTR: SRP op announce FAILED: %s %s", str(e), str(m)), 2)
         end
-        # Also re-announce services for fabrics collected during commissioning
-        # (before start()). These were added early via mdns_announce_op_discovery
-        # callbacks but may not yet be in self.sessions.fabrics.
-        try
-            if self._srp_fabrics != nil && size(self._srp_fabrics) > 0
-                var i = 0
-                while i < size(self._srp_fabrics)
-                    var fabric = self._srp_fabrics[i]
-                    if fabric != nil
-                        self.srp_announce_op_discovery(fabric)
-                    end
-                    i += 1
-                end
-            end
-        except .. as e, m
-            log(format("MTR: SRP _srp_fabrics announce FAILED: %s %s", str(e), str(m)), 2)
-        end
+
     end
 
     # SRP operational discovery for a fabric (native OT SRP client)
@@ -1006,14 +991,6 @@ class MATTER_THREAD : matter.Device
         OT.set_dataset(dataset_tlv)
         OT.start()
         log("MTR: Thread network provisioning started", 2)
-        try
-            import persist
-            persist.ot_dataset = self.thread_dataset
-            persist.save()
-            log("MTR: Thread dataset saved to persist", 2)
-        except .. as e, m
-            log(format("MTR: persisting dataset FAILED: %s %s", str(e), str(m)), 2)
-        end
     end
 
     ###########################################################
@@ -1032,9 +1009,6 @@ class MATTER_THREAD : matter.Device
     def every_50ms()
         if self.current_func self.current_func() end
         self.tick += 1
-        if self.tick % 100 == 0
-            log("MTR: every_50ms alive tick=" + str(self.tick) + " started=" + str(self.started), 2)
-        end
         self.message_handler.every_50ms()
         # Native OT SRP client manages its own retry/refresh timers internally.
         # No Berry-side tick needed.
@@ -1058,6 +1032,22 @@ class MATTER_THREAD : matter.Device
             end
         end
         # Poll OT UDP receive queue
+        # Detect WiFi OFF transition and reclaim the shared 802.15.4 radio for Thread
+        if self.ot_started
+            var wifi_up = tasmota.wifi().find("up") == true
+            if (self.pending_radio_reclaim || (self.wifi_was_up && !wifi_up)) && !wifi_up
+                try
+                    import OT
+                    OT.radio_reclaim()
+                    log("MTR: 802.15.4 radio reclaimed after WiFi shutdown", 2)
+                except .. as e, m
+                    log(format("MTR: radio reclaim FAILED: %s %s", str(e), str(m)), 2)
+                end
+            end
+            self.pending_radio_reclaim = false
+            self.wifi_was_up = wifi_up
+        end
+
         if self.started
             import OT
             # Drain up to 4 packets per tick. Each packet is dispatched independently
@@ -1073,7 +1063,7 @@ class MATTER_THREAD : matter.Device
                     break
                 end
                 if pkt == nil  break end
-                log(format("MTR: OT UDP recv %i bytes from [%s]:%i", size(pkt[0]), pkt[1], pkt[2]), 2)
+                log(format("MTR: OT UDP recv %i bytes from [%s]:%i", size(pkt[0]), pkt[1], pkt[2]), 4)
                 try
                     self.msg_received(pkt[0], pkt[1], pkt[2])
                 except .. as e, m
@@ -1097,22 +1087,14 @@ return MATTER_THREAD()
 #-
 Build-time: Define USE_MATTER_THREAD in your build (platformio env or user_config_override.h). Target must be ESP32-H2, C6, or C5 with OpenThread enabled in sdkconfig.
 
-Berry autoexec.be — load the Thread device class at boot:
-    # autoexec.be
-    if tasmota.cmd("so151")["SetOption151"] == "OFF"
-        tasmota.cmd("so151 1")
-    end
-    tasmota.cmd("so115 1")    # enable BLE
-    tasmota.set_timer(5000, /-> load("Matter_Thread_Device.be"))
-
-    Commissioning flow (what happens automatically):
-Device starts BLE advertising (Matter FFF6 service with discriminator)
-    Commissioner (phone/chip-tool) discovers via BLE, scans QR code
-    PASE handshake over BLE/BTP
-    Commissioner sends AddOrUpdateThreadNetwork (Thread dataset TLV)
-    Commissioner sends ConnectNetwork → device calls OT.set_dataset() + OT.start()
-    Device joins Thread mesh, registers via SRP
-    Commissioner discovers device via DNS-SD, completes CASE over Thread/UDP
-    All subsequent operation is over Thread — no WiFi needed (H2) or used
-No WiFi config needed on ESP32-H2. The device operates entirely over Thread after commissioning. If H2 is ever supported in Tasmota ...
+Commissioning flow:
+  Device starts BLE advertising (Matter FFF6 service with discriminator)
+  Commissioner discovers via BLE, scans QR code → PASE handshake
+  Commissioner sends AddOrUpdateThreadNetwork (dataset TLV)
+  Commissioner sends ConnectNetwork → OT.set_dataset() + OT.start()
+  WiFi is temporarily turned OFF to force commissioning over Thread
+  Device joins Thread mesh, registers via SRP (DNS-SD)
+  Commissioner discovers device via SRP, completes CASE over Thread/UDP
+  Subsequent operation is over Thread; WiFi remains off for the session
+  (next boot restores WiFi to user's configured state)
 -#
