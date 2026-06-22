@@ -50,11 +50,11 @@
  * Provides: OT.init(), OT.start(), OT.stop(), OT.set_dataset(), OT.get_dataset(),
  *           OT.get_role(), OT.get_ipaddr(), OT.get_eui64(), OT.state_cb(),
  *           OT.factory_reset(), OT.netdata_services(), OT.set_log_level(),
- *           OT.udp_*(), OT.coap_send_request(), OT.coap_poll_response()
+ *           OT.udp_*()
  *
  * Note: SRP client functions are NOT in this file. The SRP client lives in Berry at
  *       lib/libesp32/berry_matter/src/embedded/Matter_SRP_Client.be and uses the
- *       OT.coap_*() wrappers for transport.
+ *       OT.udp_srp_*() wrappers for transport.
 \*********************************************************************************************/
 
 // ---- UDP receive queue ----
@@ -543,108 +543,9 @@ extern "C" int be_OT_coex_prefer_thread(bvm *vm) {
   be_return(vm);
 }
 
-// ---- CoAP client (wraps bt_coap_*) ----
-//
-// The OpenThread CoAP API (otCoapSendRequest, otMessage, otMessageInfo) is
-// declared with OT types that don't reliably resolve in the merged .ino.cpp
-// (the Arduino prototype generator places includes before the function
-// signatures, so OT types are sometimes invisible to the IDE/build).
-// Instead, all OT CoAP state lives inside BearThread as a hidden queue; the
-// bt_coap_*() wrapper functions in bt_platform.h take only C types and a
-// heap-copied payload. The be_OT_coap_*() functions below are thin Berry
-// shims over those wrappers. Berry-side Matter_SRP_Client.be uses
-// OT.coap_send_request(method, uri, cfmt, payload, addr, port, userdata)
-// to build CoAP POSTs for SRP UPDATE / DNS-SD messages.
-
-// OT.coap_send_request(method, uri, content_format, payload, addr, port, userdata)
-//
-//   method         : "GET" | "POST" | "PUT" | "DELETE"
-//                    (currently only POST is used by the Berry-side SRP client;
-//                     other methods are accepted but routed as POST in the
-//                     BearThread wrapper — extend bt_coap.cpp when needed.)
-//   uri            : CoAP URI-Path (e.g. "a/srp")
-//   content_format : 0 to omit, 42 for application/dns-message
-//   payload        : raw bytes (may be nil/empty)
-//   addr           : destination IPv6 string (e.g. "fd1d:bc81:cb5e::1")
-//   port           : uint destination UDP port
-//   userdata       : int opaque handle returned in the response (correlation id)
-//
-// Returns true on enqueue success, false on error.
-extern "C" int be_OT_coap_send_request(bvm *vm) {
-  int argc = be_top(vm);
-  if (argc < 7
-      || !be_isstring(vm, 1) || !be_isstring(vm, 2) || !be_isint(vm, 3)
-      || !be_isstring(vm, 5) || !be_isint(vm, 6) || !be_isint(vm, 7)) {
-    be_raise(vm, kTypeError, "OT: coap_send_request needs (method, uri, cfmt, payload, addr, port, userdata)");
-  }
-  const char *method_str = be_tostring(vm, 1);
-  (void)method_str; // currently informational; bt_coap_send_request is POST-only
-  const char *uri        = be_tostring(vm, 2);
-  int cfmt               = be_toint(vm, 3);
-  // arg 4 = payload (bytes-or-nil)
-  size_t payload_len = 0;
-  const uint8_t *payload = nullptr;
-  if (argc >= 4 && be_isbytes(vm, 4)) {
-    payload = (const uint8_t *)be_tobytes(vm, 4, &payload_len);
-  }
-  const char *addr_str  = be_tostring(vm, 5);
-  uint16_t    port      = (uint16_t)be_toint(vm, 6);
-  uint32_t    userdata   = (uint32_t)be_toint(vm, 7);
-
-  if (!OT_State.initialized) {
-    be_pushbool(vm, false);
-    be_return(vm);
-  }
-
-  esp_err_t rc = bt_coap_send_request(userdata, uri, cfmt,
-                                      payload, payload_len,
-                                      addr_str, port);
-  be_pushbool(vm, rc == ESP_OK);
-  be_return(vm);
-}
-
-// OT.coap_poll_response() -> [userdata, err, code, addr, port, payload_bytes] or nil
-//
-// Drains one pending CoAP response from the BearThread-internal queue. Returns
-// nil if no response is waiting. Otherwise returns a 6-element list:
-//   [0] userdata int  (the handle passed to coap_send_request)
-//   [1] err    int   (otError; 0 = OT_ERROR_NONE, 28 = OT_ERROR_RESPONSE_TIMEOUT, ...)
-//   [2] code   int   (raw CoAP response code, e.g. 0x84 = 4.04 Not Found)
-//   [3] addr   str   (source IPv6 of the response, "[<ipv6>]")
-//   [4] port   int   (source UDP port)
-//   [5] payload bytes
-extern "C" int be_OT_coap_poll_response(bvm *vm) {
-  bt_coap_response_t resp;
-  if (!bt_coap_poll_response(&resp)) {
-    be_return_nil(vm);
-  }
-  be_newobject(vm, "list");
-  // [0] userdata
-  be_pushint(vm, (int32_t)resp.userdata);
-  be_data_push(vm, -2);
-  be_pop(vm, 1);
-  // [1] err
-  be_pushint(vm, (int32_t)resp.err);
-  be_data_push(vm, -2);
-  be_pop(vm, 1);
-  // [2] code
-  be_pushint(vm, (int32_t)resp.code);
-  be_data_push(vm, -2);
-  be_pop(vm, 1);
-  // [3] addr
-  be_pushstring(vm, resp.addr);
-  be_data_push(vm, -2);
-  be_pop(vm, 1);
-  // [4] port
-  be_pushint(vm, (int32_t)resp.port);
-  be_data_push(vm, -2);
-  be_pop(vm, 1);
-  // [5] payload bytes
-  be_pushbytes(vm, resp.payload, resp.payload_len);
-  be_data_push(vm, -2);
-  be_pop(vm, 1);
-
-  be_pop(vm, 1);  // pop list internal
+// OT.radio_reclaim() — re-enable 802.15.4 radio after WiFi PHY shutdown
+extern "C" int be_OT_radio_reclaim(bvm *vm) {
+  bt_radio_reclaim();
   be_return(vm);
 }
 
@@ -664,14 +565,9 @@ static void ot_udp_receive_callback(void *aContext, void *aMessage, const void *
   if (!OT_State.udp_rx_queue) return;
 
   static ot_udp_rx_packet_t pkt;
-  static uint32_t s_udp_rx_count = 0;
-  s_udp_rx_count++;
   pkt.len = otMessageRead(msg, offset, pkt.data, length);
   otIp6AddressToString(&info->mPeerAddr, pkt.addr, sizeof(pkt.addr));
   pkt.port = info->mPeerPort;
-
-  AddLog(LOG_LEVEL_INFO, PSTR("OT : UDP rx #%u len=%u from [%s]:%u"),
-         s_udp_rx_count, length, pkt.addr, info->mPeerPort);
 
   if (xQueueSend(OT_State.udp_rx_queue, &pkt, 0) != pdTRUE) {
     AddLog(LOG_LEVEL_DEBUG, PSTR("OT : UDP rx queue full, dropped"));
@@ -1116,7 +1012,7 @@ extern "C" int be_OT_srp_add_service(bvm *vm) {
 
   int slot = -1;
   for (int i = 0; i < MAX_SRP_SERVICES; i++) {
-    if (s_srp_services[i].in_use && strcmp(s_srp_services[i].name, service_name) == 0) {
+    if (s_srp_services[i].in_use && strcmp(s_srp_services[i].instance_name, instance_name) == 0) {
       slot = i;
       break;
     }
@@ -1206,7 +1102,6 @@ extern "C" int be_OT_srp_remove_service(bvm *vm) {
     be_return_nil(vm);
   }
   const char *instance_name = be_tostring(vm, 1);
-  (void)instance_name;
   const char *service_name = be_tostring(vm, 2);
 
   otInstance *instance = (otInstance*)ot_lock_and_get();
@@ -1217,7 +1112,7 @@ extern "C" int be_OT_srp_remove_service(bvm *vm) {
 
   otError err = OT_ERROR_NOT_FOUND;
   for (int i = 0; i < MAX_SRP_SERVICES; i++) {
-    if (s_srp_services[i].in_use && strcmp(s_srp_services[i].name, service_name) == 0) {
+    if (s_srp_services[i].in_use && strcmp(s_srp_services[i].instance_name, instance_name) == 0) {
       err = otSrpClientClearService(instance, &s_srp_services[i].service);
       s_srp_services[i].in_use = false;
       break;
