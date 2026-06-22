@@ -9,6 +9,8 @@
 
 #ifdef USE_MATTER_THREAD
 
+#if 0   // Disabled — BearSSL crypto provides otPlatCryptoHmacSha256* via bt_crypto_bearssl.cpp
+
 #include <string.h>
 #include <stdlib.h>
 #include <mbedtls/sha256.h>
@@ -149,4 +151,5 @@ extern "C" otError otPlatCryptoHmacSha256Finish(otCryptoContext *aContext,
     return OT_ERROR_NONE;
 }
 
+#endif  // #if 0
 #endif /* USE_MATTER_THREAD */

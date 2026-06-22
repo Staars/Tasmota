@@ -37,6 +37,8 @@
 
 #ifdef USE_MATTER_THREAD
 
+#if 0   // Disabled — BearSSL crypto provides deterministic ECDSA signing via bt_crypto_bearssl.cpp
+
 #include <string.h>
 
 #include <mbedtls/ecdsa.h>
@@ -125,4 +127,5 @@ cleanup:
 
 #endif /* MBEDTLS_ECDSA_C && MBEDTLS_ECDSA_DETERMINISTIC */
 
+#endif  // #if 0
 #endif /* USE_MATTER_THREAD */

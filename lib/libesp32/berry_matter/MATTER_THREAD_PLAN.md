@@ -152,7 +152,31 @@ Goal: eliminate libs that matter‑device can't distribute.
 | `Matter_Thread_Device.be` | Berry Matter orchestrator |
 | Reference | `~/Developer/esp-matter/examples/light` + IDF `esp_openthread_radio.c` |
 
-## Build
+---
+## Regression: WiFi ON blocks CASE over Thread on C6 (2025-06-21)
+
+After removing `wifi 0` from the commissioned boot path, the device registers
+SRP successfully (`services=2`) but stays **unreachable** from Apple Home.
+
+### Root cause
+The ESP32-C6 shares a single 2.4 GHz analog front-end between WiFi and 802.15.4.
+With WiFi ON and actively transmitting (MQTT, web server), the coexistence
+scheduler's default priority (`txrx=LOW`) causes 802.15.4 RX drops — including
+CASE Sigma1 from the Border Router.
+
+### Proof
+Manual `wifi 0` after boot instantly makes the device reachable.
+
+### Design options (pending)
+
+| Option | Trade-off |
+|--------|-----------|
+| **A: WiFi OFF for commissioned** — revert to original `wifi 0` + `pending_radio_reclaim` | ✓ Proven to work, simple. ✗ No web/MQTT/OTA during Thread runtime. |
+| **B: `coex_prefer_thread(true)` with WiFi ON** — restore coex bias now that radio reclaim is fixed | ✓ WiFi stays ON. ✗ Previously caused WiFi disconnects — may have been due to now-fixed reclaim spam, needs retest. |
+| **C: WiFi OFF by default, on-demand toggle** — `wifi 0` on boot, command/topic for timed `wifi 1` (e.g. 5 min for OTA) | ✓ Thread reliable, WiFi available for maintenance. ✗ More complex. |
+| **D: Per-traffic-class coex** — bias Thread only during CASE window | ✗ Over-engineered, fragile. |
+
+
 
 ```
 pio run -e tasmota32c6   (or tasmota32c6-mi32)

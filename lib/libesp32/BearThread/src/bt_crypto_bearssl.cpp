@@ -11,8 +11,6 @@
 
 #ifdef USE_MATTER_THREAD
 
-#if 0   // BearSSL completely disabled — using CRYPTO_LIB_MBEDTLS with mbedTLS WEAK defaults
-
 #include <string.h>
 #include <openthread/error.h>
 #include <openthread/platform/crypto.h>
@@ -31,17 +29,12 @@ extern "C" {
 #include "t_bearssl_block.h"
 #include "t_bearssl_hash.h"
 #include "t_bearssl_hmac.h"
+#include "t_bearssl_kdf.h"
 #include "t_bearssl_rand.h"
 #include "t_bearssl_ec.h"
 }
 
 #include "esp_random.h"
-
-#define MBEDTLS_ALLOW_PRIVATE_ACCESS
-#include <mbedtls/ecdsa.h>
-#include <mbedtls/error.h>
-#include <mbedtls/pk.h>
-#include <mbedtls/version.h>
 
 /* ---- Internal: PRNG for BearSSL EC keygen ---- */
 
@@ -327,86 +320,31 @@ extern "C" otError otPlatCryptoEcdsaGetPublicKey(const otPlatCryptoEcdsaKeyPair 
   return OT_ERROR_NONE;
 }
 
-static int mbedtls_rng_wrapper(void *ctx, unsigned char *buf, size_t len) {
-    (void)ctx;
-    esp_fill_random(buf, len);
-    return 0;
-}
-
 extern "C" otError otPlatCryptoEcdsaSign(const otPlatCryptoEcdsaKeyPair *aKeyPair,
                                           const otPlatCryptoSha256Hash   *aHash,
                                           otPlatCryptoEcdsaSignature     *aSignature) {
   if (!aKeyPair || !aHash || !aSignature) return OT_ERROR_INVALID_ARGS;
 
-  mbedtls_pk_context pk;
-  mbedtls_ecdsa_context ecdsa;
-  mbedtls_mpi r, s;
-  int ret;
-
-  mbedtls_pk_init(&pk);
-  mbedtls_ecdsa_init(&ecdsa);
-  mbedtls_mpi_init(&r);
-  mbedtls_mpi_init(&s);
-
-  ret = mbedtls_pk_setup(&pk, mbedtls_pk_info_from_type(MBEDTLS_PK_ECKEY));
-  if (ret != 0) {
-    mbedtls_pk_free(&pk);
-    mbedtls_ecdsa_free(&ecdsa);
-    mbedtls_mpi_free(&s);
-    mbedtls_mpi_free(&r);
-    return OT_ERROR_FAILED;
-  }
-
-#if (MBEDTLS_VERSION_NUMBER >= 0x03000000)
-  ret = mbedtls_pk_parse_key(&pk, aKeyPair->mDerBytes, aKeyPair->mDerLength, nullptr, 0,
-                              mbedtls_rng_wrapper, nullptr);
-#else
-  ret = mbedtls_pk_parse_key(&pk, aKeyPair->mDerBytes, aKeyPair->mDerLength, nullptr, 0);
-#endif
-  if (ret != 0) {
-    mbedtls_pk_free(&pk);
-    mbedtls_ecdsa_free(&ecdsa);
-    mbedtls_mpi_free(&s);
-    mbedtls_mpi_free(&r);
+  uint8_t privkey[32];
+  if (!der_extract_privkey(aKeyPair->mDerBytes, aKeyPair->mDerLength, privkey))
     return OT_ERROR_PARSE;
-  }
 
-  {
-    mbedtls_ecp_keypair *keypair = mbedtls_pk_ec(pk);
-    ret = mbedtls_ecdsa_from_keypair(&ecdsa, keypair);
-  }
-  if (ret != 0) {
-    mbedtls_pk_free(&pk);
-    mbedtls_ecdsa_free(&ecdsa);
-    mbedtls_mpi_free(&s);
-    mbedtls_mpi_free(&r);
-    return OT_ERROR_FAILED;
-  }
+  br_ec_private_key sk;
+  sk.curve = BR_EC_secp256r1;
+  sk.x = privkey;
+  sk.xlen = 32;
 
-#if (MBEDTLS_VERSION_NUMBER >= 0x02130000)
-  ret = mbedtls_ecdsa_sign_det_ext(&ecdsa.grp, &r, &s, &ecdsa.d, aHash->m8, 32, MBEDTLS_MD_SHA256, mbedtls_rng_wrapper, nullptr);
-#else
-  ret = mbedtls_ecdsa_sign_det(&ecdsa.grp, &r, &s, &ecdsa.d, aHash->m8, 32, MBEDTLS_MD_SHA256);
-#endif
-  if (ret != 0) {
-    mbedtls_pk_free(&pk);
-    mbedtls_ecdsa_free(&ecdsa);
-    mbedtls_mpi_free(&s);
-    mbedtls_mpi_free(&r);
-    return OT_ERROR_FAILED;
-  }
+  const br_ec_impl *ec = br_ec_get_default();
+
+  uint8_t sig[64];
+  size_t sig_len = br_ecdsa_i15_sign_raw(ec, &br_sha256_vtable, aHash->m8, &sk, sig);
+  if (sig_len != 64) return OT_ERROR_FAILED;
 
   memset(aSignature->m8, 0, OT_CRYPTO_ECDSA_SIGNATURE_SIZE);
-  mbedtls_mpi_write_binary(&r, aSignature->m8, 32);
-  mbedtls_mpi_write_binary(&s, aSignature->m8 + 32, 32);
+  memcpy(aSignature->m8, sig, 64);
 
-  AddLog(BT_CRYPTO_LOG_INFO, "SIG_MTLS: r0=%02x s0=%02x",
+  AddLog(BT_CRYPTO_LOG_INFO, "SIG_BEARSSL: r0=%02x s0=%02x",
          aSignature->m8[0], aSignature->m8[32]);
-
-  mbedtls_pk_free(&pk);
-  mbedtls_mpi_free(&s);
-  mbedtls_mpi_free(&r);
-  mbedtls_ecdsa_free(&ecdsa);
 
   return OT_ERROR_NONE;
 }
@@ -431,6 +369,53 @@ extern "C" otError otPlatCryptoEcdsaVerify(const otPlatCryptoEcdsaPublicKey *aPu
   return (result == 1) ? OT_ERROR_NONE : OT_ERROR_SECURITY;
 }
 
+/* ---- HKDF (HMAC-based Extract-and-Expand) ---- */
+
+extern "C" otError otPlatCryptoHkdfInit(otCryptoContext *aContext) {
+  if (!aContext || aContext->mContextSize < sizeof(br_hkdf_context))
+    return OT_ERROR_INVALID_ARGS;
+  memset(aContext->mContext, 0, sizeof(br_hkdf_context));
+  return OT_ERROR_NONE;
+}
+
+extern "C" otError otPlatCryptoHkdfExtract(otCryptoContext   *aContext,
+                                            const uint8_t     *aSalt,
+                                            uint16_t           aSaltLength,
+                                            const otCryptoKey *aInputKey) {
+  if (!aContext || !aInputKey || !aInputKey->mKey)
+    return OT_ERROR_INVALID_ARGS;
+  if (aContext->mContextSize < sizeof(br_hkdf_context))
+    return OT_ERROR_FAILED;
+
+  br_hkdf_context *hc = (br_hkdf_context *)aContext->mContext;
+  br_hkdf_init(hc, &br_sha256_vtable, aSalt, aSaltLength);
+  br_hkdf_inject(hc, aInputKey->mKey, aInputKey->mKeyLength);
+  br_hkdf_flip(hc);
+  return OT_ERROR_NONE;
+}
+
+extern "C" otError otPlatCryptoHkdfExpand(otCryptoContext *aContext,
+                                           const uint8_t   *aInfo,
+                                           uint16_t         aInfoLength,
+                                           uint8_t         *aOutputKey,
+                                           uint16_t         aOutputKeyLength) {
+  if (!aContext || !aInfo || !aOutputKey)
+    return OT_ERROR_INVALID_ARGS;
+  if (aContext->mContextSize < sizeof(br_hkdf_context))
+    return OT_ERROR_FAILED;
+
+  br_hkdf_context *hc = (br_hkdf_context *)aContext->mContext;
+  br_hkdf_produce(hc, aInfo, aInfoLength, aOutputKey, aOutputKeyLength);
+  return OT_ERROR_NONE;
+}
+
+extern "C" otError otPlatCryptoHkdfDeinit(otCryptoContext *aContext) {
+  if (!aContext)
+    return OT_ERROR_INVALID_ARGS;
+  memset(aContext->mContext, 0, aContext->mContextSize);
+  return OT_ERROR_NONE;
+}
+
 /* ---- Platform Init ---- */
 
 extern "C" void otPlatCryptoInit(void) {
@@ -450,5 +435,4 @@ extern "C" otError otPlatCryptoRandomGet(uint8_t *aBuffer, uint16_t aSize) {
   return OT_ERROR_NONE;
 }
 
-#endif  // #if 0 — BearSSL disabled
 #endif /* USE_MATTER_THREAD */

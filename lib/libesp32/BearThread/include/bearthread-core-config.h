@@ -15,9 +15,15 @@
 #define OPENTHREAD_CONFIG_PLATFORM_INFO "BearThread-ESP32"
 #define PACKAGE_NAME "BearThread"
 
-/* ---- mbedTLS crypto backend (matching esp-matter) ---- */
-/* Use OT's default mbedTLS-based crypto via WEAK platform callbacks */
-#define OPENTHREAD_CONFIG_CRYPTO_LIB                           0  /* OPENTHREAD_CONFIG_CRYPTO_LIB_MBEDTLS */
+/* ---- BearSSL crypto backend (CRYPTO_LIB_PLATFORM) ---- */
+/* Uses bt_crypto_bearssl.cpp to provide otPlatCrypto*() callbacks via BearSSL.
+ * These context sizes must be >= sizeof() of the BearSSL structs stored in the
+ * opaque OT crypto context buffer. */
+#define OPENTHREAD_CONFIG_CRYPTO_LIB                           2  /* OPENTHREAD_CONFIG_CRYPTO_LIB_PLATFORM */
+#define OPENTHREAD_CONFIG_AES_CONTEXT_SIZE                   256
+#define OPENTHREAD_CONFIG_HMAC_SHA256_CONTEXT_SIZE           512
+#define OPENTHREAD_CONFIG_SHA256_CONTEXT_SIZE                128
+#define OPENTHREAD_CONFIG_HKDF_CONTEXT_SIZE                  512
 #define OPENTHREAD_CONFIG_ENABLE_BUILTIN_MBEDTLS               0
 #define OPENTHREAD_CONFIG_ENABLE_BUILTIN_MBEDTLS_MANAGEMENT    0
 
