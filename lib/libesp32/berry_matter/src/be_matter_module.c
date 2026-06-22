@@ -277,9 +277,7 @@ extern const bclass be_class_Matter_TLV;   // need to declare it upfront because
 #include "solidify/solidified_Matter_BTP.h"
 #include "solidify/solidified_Matter_zz_Device_BLE.h"
 #endif //USE_MI_EXT_GUI
-#if USE_MATTER_THREAD
-#include "solidify/solidified_Matter_SRP_Client.h"
-#endif //USE_MATTER_THREAD
+
 #include "solidify/solidified_Matter_zz_Device.h"
 
 #include "be_fixed_matter.h"
@@ -449,8 +447,6 @@ module matter (scope: global, strings: weak) {
   // optional Matter BLE Device core class
   Device_BLE, class(be_class_Matter_Device_BLE), USE_MI_EXT_GUI
 
-  // optional Matter SRP client for Thread
-  SRP_Client, class(be_class_Matter_SRP_Client), USE_MATTER_THREAD
 
   // Matter Device core class
   Device, class(be_class_Matter_Device)
