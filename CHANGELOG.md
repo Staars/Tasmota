@@ -3,7 +3,29 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased] - Development
 
-## [15.4.0.2]
+## [15.4.0.3]
+### Added
+- Serial console support for Backspace when enabling `#define USE_SERIAL_BACKSPACE` (#24830)
+- Build copy firmware artifacts with ELF-extracted build timestamp (opt-in) (#24794)
+- Enhance Matter plugin functionality for On/Off control and add support for Global Scene Control and related commands (#24854)
+- Command `BSSid[1|2] [0|1|11:22:33:44:55:66]` to select fixed WiFi Access Point disabling `SetOption56` and `SetOption57` (#24394)
+
+### Breaking Changed
+
+### Changed
+- Sensirion_Core library from v0.7.2 to arduino-core v0.7.3
+- SCD30 library FrogmoreScd30 to Sensirion arduino-i2c-scd30 v1.1.1
+- SCD4x library FrogmoreScd40 to Sensirion arduino-i2c-scd4x v1.1.0
+- SPS30 library Sensirion arduino-i2c-sps30 v1.0.1
+- Code hardening replacing `strcat` and `strcpy` with safer alternatives (#24832)
+- Berry optimized solidified structures for code constants and maps (#24838)
+
+### Fixed
+- SML modbus/TCP on ESP32-p4 with only Ethernet shows "SML: could not connect TCP since wifi is down" (#24845)
+
+### Removed
+
+## [15.4.0.2] 20260603
 ### Added
 - Support for Modbus RX Enable GPIO (#24726)
 - Support for hostname generation using single-specifier Format() patterns (#24731)
@@ -13,9 +35,9 @@ All notable changes to this project will be documented in this file.
 - Berry manual tool to compare and verify solidification between C and Python (#24754)
 - ESP32 VID6608 hardware RMT support for Automotive gauge driver (#24759)
 - Support for uDisplay ST7305 (#24738)
-- Support for hosted MCU different from esp32c6
-
-### Breaking Changed
+- Support for hosted MCU other than esp32c6
+- Trigger events to Berry when `USE_RULES` is not enabled (#24796)
+- Support for Modbus Relays (#24812)
 
 ### Changed
 - ESP32 Platform from 2026.04.50 to 2026.05.50, Framework (Arduino Core) from v3.3.8 to v3.3.8.260506 and IDF v5.5.4.260407 (#24718)
@@ -29,6 +51,10 @@ All notable changes to this project will be documented in this file.
 - NeoPool possible overflow/div-zero errors and Hydrolysis module detection (#24724)
 - Seesaw encoder position tracking in light control mode (#24730)
 - I80 pushColors swap logic for parallel displays (#24766)
+- Crash when MQTT-TLS when tcp connection failed (#24798)
+- Berry `write(value:int | s:string) -> nil` internal argument parsing (#24800)
+- MiElHVAC sensor and settings out of sync (#24813)
+- SPS30 not detected on ESP8266 (#24780)
 
 ### Removed
 - `USE_UNIVERSAL_TOUCH` no more forced when `USE_UNIVERSAL_DISPLAY` is enabled (#24743)
