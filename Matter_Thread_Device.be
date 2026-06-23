@@ -15,7 +15,7 @@ import matter
 class MATTER_THREAD : matter.Device_Thread
     var have_light
 
-    def init_light()
+    def on_ble_init()
         try
             import light
             light.set({'bri': 5, 'hue': 150, 'power': true, 'sat': 255})
@@ -47,6 +47,9 @@ class MATTER_THREAD : matter.Device_Thread
             import light
             light.set({'bri':50,'hue':0})       # red
         end
+        import OT
+        OT.srp_stop()
+        tasmota.cmd("restart 1")
     end
 end
 

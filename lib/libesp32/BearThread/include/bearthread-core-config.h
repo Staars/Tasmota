@@ -35,7 +35,7 @@
 #define OPENTHREAD_CONFIG_BORDER_ROUTING_ENABLE                0
 #define OPENTHREAD_CONFIG_BORDER_AGENT_ENABLE                  0
 #define OPENTHREAD_CONFIG_BACKBONE_ROUTER_ENABLE               0
-#define OPENTHREAD_CONFIG_TCP_ENABLE                            0
+#define OPENTHREAD_CONFIG_TCP_ENABLE                           0
 #define OPENTHREAD_CONFIG_TIME_SYNC_ENABLE                     0
 #define OPENTHREAD_CONFIG_RADIO_STATS_ENABLE                   0
 #define OPENTHREAD_CONFIG_MAC_CSL_RECEIVER_ENABLE              0
@@ -84,7 +84,7 @@
 #define OPENTHREAD_CONFIG_SRP_CLIENT_BUFFERS_MAX_SERVICES      5
 #define OPENTHREAD_CONFIG_ECDSA_ENABLE                         1
 #define OPENTHREAD_CONFIG_DNS_CLIENT_ENABLE                    1
-#define OPENTHREAD_CONFIG_COAP_API_ENABLE                      1
+#define OPENTHREAD_CONFIG_COAP_API_ENABLE                      0
 #define OPENTHREAD_CONFIG_IP6_SLAAC_ENABLE                     1
 #define OPENTHREAD_CONFIG_TMF_NETDATA_SERVICE_ENABLE           1
 #define OPENTHREAD_CONFIG_PLATFORM_NETIF_ENABLE                0   /* We don't use esp_netif */

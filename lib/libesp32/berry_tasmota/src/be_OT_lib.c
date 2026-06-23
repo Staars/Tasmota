@@ -18,56 +18,57 @@ BE_FUNC_CTYPE_DECLARE(be_OT_start, "", "@");
 extern void be_OT_stop(struct bvm *vm);
 BE_FUNC_CTYPE_DECLARE(be_OT_stop, "", "@");
 
-extern const char* be_OT_get_role(void);
-BE_FUNC_CTYPE_DECLARE(be_OT_get_role, "s", "");
-
 extern void be_OT_set_dataset(struct bvm *vm, uint8_t *buf, size_t size);
 BE_FUNC_CTYPE_DECLARE(be_OT_set_dataset, "", "@(bytes)~");
-
-extern uint8_t* be_OT_get_dataset(int32_t notused, size_t *size);
-BE_FUNC_CTYPE_DECLARE(be_OT_get_dataset, "&", "[i]");
 
 extern const char* be_OT_get_eui64(void);
 BE_FUNC_CTYPE_DECLARE(be_OT_get_eui64, "s", "");
 
 extern int be_OT_get_ipaddr(bvm *vm);
 
-extern void be_OT_state_cb(void *function);
-BE_FUNC_CTYPE_DECLARE(be_OT_state_cb, "", "c");
-
-extern void be_OT_factory_reset(struct bvm *vm);
-BE_FUNC_CTYPE_DECLARE(be_OT_factory_reset, "", "@");
-
 extern int be_OT_netdata_services(bvm *vm);
-extern int be_OT_set_log_level(bvm *vm);
-extern int be_OT_coex_prefer_thread(bvm *vm);
-extern int be_OT_radio_reclaim(bvm *vm);
 extern int be_OT_poll_state(bvm *vm);
 
-extern int be_OT_udp_open(bvm *vm);
-extern int be_OT_udp_send(bvm *vm);
+extern void be_OT_radio_reclaim(void);
+BE_FUNC_CTYPE_DECLARE(be_OT_radio_reclaim, "", "");
+
+extern void be_OT_udp_open(struct bvm *vm, int32_t port);
+BE_FUNC_CTYPE_DECLARE(be_OT_udp_open, "", "@i");
+
+extern void be_OT_udp_send(struct bvm *vm, const char *addr, int32_t port, const uint8_t *data, size_t size);
+BE_FUNC_CTYPE_DECLARE(be_OT_udp_send, "", "@si(bytes)~");
+
 extern int be_OT_udp_poll(bvm *vm);
 
 extern void be_OT_udp_close(struct bvm *vm);
 BE_FUNC_CTYPE_DECLARE(be_OT_udp_close, "", "@");
 
-extern int be_OT_udp_srp_open(bvm *vm);
-extern int be_OT_udp_srp_send(bvm *vm);
-extern int be_OT_udp_srp_poll(bvm *vm);
+extern void be_OT_srp_set_hostname(struct bvm *vm, const char *name);
+BE_FUNC_CTYPE_DECLARE(be_OT_srp_set_hostname, "", "@s");
 
-extern void be_OT_udp_srp_close(struct bvm *vm);
-BE_FUNC_CTYPE_DECLARE(be_OT_udp_srp_close, "", "@");
+extern void be_OT_srp_add_service(struct bvm *vm, const char *inst, const char *svc, int32_t port, const char *sub, const char *txt);
+BE_FUNC_CTYPE_DECLARE(be_OT_srp_add_service, "", "@ssiss");
 
-extern int be_OT_srp_set_hostname(bvm *vm);
-extern int be_OT_srp_add_service(bvm *vm);
-extern int be_OT_srp_remove_service(bvm *vm);
-extern int be_OT_srp_start(bvm *vm);
-extern int be_OT_srp_stop(bvm *vm);
-extern int be_OT_srp_is_running(bvm *vm);
-extern int be_OT_srp_get_host_state(bvm *vm);
-extern int be_OT_srp_get_server(bvm *vm);
-extern int be_OT_srp_disable_autostart(bvm *vm);
-extern int be_OT_srp_set_lease_interval(bvm *vm);
+extern void be_OT_srp_remove_service(struct bvm *vm, const char *inst, const char *svc);
+BE_FUNC_CTYPE_DECLARE(be_OT_srp_remove_service, "", "@ss");
+
+extern void be_OT_srp_start(struct bvm *vm);
+BE_FUNC_CTYPE_DECLARE(be_OT_srp_start, "", "@");
+
+extern void be_OT_srp_stop(struct bvm *vm);
+BE_FUNC_CTYPE_DECLARE(be_OT_srp_stop, "", "@");
+
+extern bbool be_OT_srp_is_running(void);
+BE_FUNC_CTYPE_DECLARE(be_OT_srp_is_running, "b", "");
+
+extern const char* be_OT_srp_get_host_state(void);
+BE_FUNC_CTYPE_DECLARE(be_OT_srp_get_host_state, "s", "");
+
+extern const char* be_OT_srp_get_server(void);
+BE_FUNC_CTYPE_DECLARE(be_OT_srp_get_server, "s", "");
+
+extern void be_OT_srp_set_lease_interval(struct bvm *vm, int32_t lease, int32_t key_lease);
+BE_FUNC_CTYPE_DECLARE(be_OT_srp_set_lease_interval, "", "@ii");
 
 #include "be_fixed_OT.h"
 
@@ -76,36 +77,25 @@ module OT (scope: global) {
   init,           func(be_OT_init)
   start,          ctype_func(be_OT_start)
   stop,           ctype_func(be_OT_stop)
-  get_role,       ctype_func(be_OT_get_role)
   set_dataset,    ctype_func(be_OT_set_dataset)
-  get_dataset,    ctype_func(be_OT_get_dataset)
   get_eui64,      ctype_func(be_OT_get_eui64)
   get_ipaddr,     func(be_OT_get_ipaddr)
-  state_cb,       ctype_func(be_OT_state_cb)
   poll_state,     func(be_OT_poll_state)
-  factory_reset,  ctype_func(be_OT_factory_reset)
   netdata_services, func(be_OT_netdata_services)
-  set_log_level,  func(be_OT_set_log_level)
-  coex_prefer_thread, func(be_OT_coex_prefer_thread)
-  radio_reclaim,  func(be_OT_radio_reclaim)
-  udp_open,       func(be_OT_udp_open)
-  udp_send,       func(be_OT_udp_send)
+  radio_reclaim,  ctype_func(be_OT_radio_reclaim)
+  udp_open,       ctype_func(be_OT_udp_open)
+  udp_send,       ctype_func(be_OT_udp_send)
   udp_poll,       func(be_OT_udp_poll)
   udp_close,      ctype_func(be_OT_udp_close)
-  udp_srp_open,   func(be_OT_udp_srp_open)
-  udp_srp_send,   func(be_OT_udp_srp_send)
-  udp_srp_poll,   func(be_OT_udp_srp_poll)
-  udp_srp_close,  ctype_func(be_OT_udp_srp_close)
-  srp_set_hostname, func(be_OT_srp_set_hostname)
-  srp_add_service,  func(be_OT_srp_add_service)
-  srp_remove_service, func(be_OT_srp_remove_service)
-  srp_start,        func(be_OT_srp_start)
-  srp_stop,         func(be_OT_srp_stop)
-  srp_is_running,   func(be_OT_srp_is_running)
-  srp_get_host_state, func(be_OT_srp_get_host_state)
-  srp_get_server,   func(be_OT_srp_get_server)
-  srp_disable_autostart, func(be_OT_srp_disable_autostart)
-  srp_set_lease_interval, func(be_OT_srp_set_lease_interval)
+  srp_set_hostname, ctype_func(be_OT_srp_set_hostname)
+  srp_add_service,  ctype_func(be_OT_srp_add_service)
+  srp_remove_service, ctype_func(be_OT_srp_remove_service)
+  srp_start,        ctype_func(be_OT_srp_start)
+  srp_stop,         ctype_func(be_OT_srp_stop)
+  srp_is_running,   ctype_func(be_OT_srp_is_running)
+  srp_get_host_state, ctype_func(be_OT_srp_get_host_state)
+  srp_get_server,   ctype_func(be_OT_srp_get_server)
+  srp_set_lease_interval, ctype_func(be_OT_srp_set_lease_interval)
 }
 @const_object_info_end */
 

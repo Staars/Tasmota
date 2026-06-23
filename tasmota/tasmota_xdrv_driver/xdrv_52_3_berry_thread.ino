@@ -47,14 +47,9 @@
 /*********************************************************************************************\
  * OpenThread native functions mapped to Berry module "OT"
  *
- * Provides: OT.init(), OT.start(), OT.stop(), OT.set_dataset(), OT.get_dataset(),
- *           OT.get_role(), OT.get_ipaddr(), OT.get_eui64(), OT.state_cb(),
- *           OT.factory_reset(), OT.netdata_services(), OT.set_log_level(),
- *           OT.udp_*()
- *
- * Note: SRP client functions are NOT in this file. The SRP client lives in Berry at
- *       lib/libesp32/berry_matter/src/embedded/Matter_SRP_Client.be and uses the
- *       OT.udp_srp_*() wrappers for transport.
+ * Provides: OT.init(), OT.start(), OT.stop(), OT.set_dataset(),
+ *           OT.get_ipaddr(), OT.get_eui64(),
+ *           OT.netdata_services(), OT.udp_*(), OT.srp_*()
 \*********************************************************************************************/
 
 // ---- UDP receive queue ----
@@ -69,20 +64,14 @@ typedef struct {
 } ot_udp_rx_packet_t;
 
 // ---- Internal state ----
-typedef void (*ot_state_cb_t)(int32_t role, int32_t arg2, int32_t arg3, int32_t arg4);
 static struct {
   bool          initialized = false;
   TaskHandle_t  task_handle = nullptr;
   bvm          *vm = nullptr;          // Berry VM reference for callbacks
-  int           state_cb_ref = 0;       // C function pointer from cb.gen_cb (legacy, unused for invocation)
   // UDP socket state (Matter data)
   otUdpSocket   udp_socket;
   QueueHandle_t udp_rx_queue = nullptr;
   bool          udp_open = false;
-  // Dedicated UDP socket for SRP (separate rx queue avoids Matter/SRP competition)
-  otUdpSocket   udp_srp_socket;
-  QueueHandle_t udp_srp_rx_queue = nullptr;
-  bool          udp_srp_open = false;
   // Thread state-change pending (latest role) - drained from Berry main task via OT.poll_state()
   // Cross-task callback into Berry VM is unsafe; we only stash the latest role here.
   volatile int32_t state_pending_role = -1;   // -1 means "no pending event"
@@ -94,7 +83,6 @@ static struct {
 static void ot_task(void *pvParameters);
 static void ot_state_changed_callback(uint32_t aFlags, void *aContext);
 static void ot_udp_receive_callback(void *aContext, void *aMessage, const void *aMessageInfo);
-static void ot_udp_srp_receive_callback(void *aContext, void *aMessage, const void *aMessageInfo);
 extern "C" void srp_client_callback(otError aError, const otSrpClientHostInfo *aHostInfo,
                                     const otSrpClientService *aServices,
                                     const otSrpClientService *aRemovedServices, void *aContext);
@@ -239,25 +227,6 @@ extern "C" void be_OT_stop(struct bvm *vm) {
   AddLog(LOG_LEVEL_INFO, PSTR("OT : Thread stopped"));
 }
 
-// ---- OT.get_role() -> string ----
-extern "C" const char* be_OT_get_role(void) {
-  if (!OT_State.initialized) return "uninitialized";
-
-  bt_lock_acquire(portMAX_DELAY);
-  otInstance *instance = bt_get_instance();
-  otDeviceRole role = otThreadGetDeviceRole(instance);
-  bt_lock_release();
-
-  switch (role) {
-    case OT_DEVICE_ROLE_DISABLED: return "disabled";
-    case OT_DEVICE_ROLE_DETACHED: return "detached";
-    case OT_DEVICE_ROLE_CHILD:    return "child";
-    case OT_DEVICE_ROLE_ROUTER:   return "router";
-    case OT_DEVICE_ROLE_LEADER:   return "leader";
-    default:                      return "unknown";
-  }
-}
-
 // ---- OT.set_dataset(bytes) ----
 // Set the Active Operational Dataset from TLV-encoded bytes
 extern "C" void be_OT_set_dataset(struct bvm *vm, uint8_t *buf, size_t size) {
@@ -282,30 +251,6 @@ extern "C" void be_OT_set_dataset(struct bvm *vm, uint8_t *buf, size_t size) {
   if (error != OT_ERROR_NONE) {
     be_raisef(vm, "ot_error", "OT: set_dataset failed: %d", error);
   }
-}
-
-// ---- OT.get_dataset() -> bytes ----
-// Get the Active Operational Dataset as TLV-encoded bytes
-extern "C" uint8_t* be_OT_get_dataset(int32_t notused, size_t *size) {
-  static otOperationalDatasetTlvs dataset;
-
-  if (!OT_State.initialized) {
-    *size = 0;
-    return nullptr;
-  }
-
-  bt_lock_acquire(portMAX_DELAY);
-  otInstance *instance = bt_get_instance();
-  otError error = otDatasetGetActiveTlvs(instance, &dataset);
-  bt_lock_release();
-
-  if (error != OT_ERROR_NONE) {
-    *size = 0;
-    return nullptr;
-  }
-
-  *size = dataset.mLength;
-  return dataset.mTlvs;
 }
 
 // ---- OT.get_eui64() -> string ----
@@ -352,68 +297,6 @@ extern "C" int be_OT_get_ipaddr(bvm *vm) {
   bt_lock_release();
 
   be_pop(vm, 1);
-  be_return(vm);
-}
-
-// ---- OT.state_cb(cb_ptr) ----
-// Register a C function pointer (from cb.gen_cb) for Thread state changes
-extern "C" void be_OT_state_cb(void *function) {
-  OT_State.state_cb_ref = (int)(intptr_t)function;
-  AddLog(LOG_LEVEL_DEBUG, PSTR("OT : state callback registered"));
-}
-
-// ---- OT.factory_reset() ----
-// Erase all Thread persistent data and reset
-extern "C" void be_OT_factory_reset(struct bvm *vm) {
-  otInstance *instance = (otInstance*)ot_lock_and_get();
-  if (!instance) {
-    be_raisef(vm, "ot_error", "OT: not initialized");
-    return;
-  }
-
-  otInstanceFactoryReset(instance);
-  ot_unlock();
-
-  AddLog(LOG_LEVEL_INFO, PSTR("OT : factory reset"));
-}
-
-
-// OT.set_log_level(level) - set OpenThread runtime log level.
-// Levels per <openthread/logging.h>:
-//   0 NONE, 1 CRIT, 2 WARN, 3 NOTE, 4 INFO, 5 DEBG.
-// Returns true on success. Note: requires the OT library to be built with
-// OPENTHREAD_CONFIG_LOG_LEVEL_DYNAMIC_ENABLE; otherwise the log level is
-// fixed at compile time and this call returns false (OT_ERROR_DISABLED_FEATURE).
-extern "C" int be_OT_set_log_level(bvm *vm) {
-  int argc = be_top(vm);
-  if (argc < 1 || !be_isint(vm, 1)) {
-    be_raise(vm, kTypeError, nullptr);
-  }
-  int lvl = be_toint(vm, 1);
-  if (lvl < 0) lvl = 0;
-  if (lvl > 5) lvl = 5;
-
-#if OPENTHREAD_CONFIG_LOG_LEVEL_DYNAMIC_ENABLE
-  bt_lock_acquire(portMAX_DELAY);
-  otError err = otLoggingSetLevel((otLogLevel)lvl);
-  bt_lock_release();
-
-  if (err == OT_ERROR_NONE) {
-    AddLog(LOG_LEVEL_INFO, PSTR("OT : log level set to %d"), lvl);
-    be_pushbool(vm, true);
-  } else {
-    AddLog(LOG_LEVEL_INFO, PSTR("OT : set_log_level failed: %d"), err);
-    be_pushbool(vm, false);
-  }
-#else
-  // OT compiled without OPENTHREAD_CONFIG_LOG_LEVEL_DYNAMIC_ENABLE,
-  // so otLoggingSetLevel is not in the library. Static level is set
-  // at compile time (see bearthread-core-config.h OPENTHREAD_CONFIG_LOG_LEVEL).
-  (void)lvl;
-  // AddLog(LOG_LEVEL_INFO, PSTR("OT : set_log_level unavailable (DYNAMIC_LOG disabled, static=%d)"),
-  //        OPENTHREAD_CONFIG_LOG_LEVEL);
-  be_pushbool(vm, false);
-#endif
   be_return(vm);
 }
 
@@ -487,66 +370,8 @@ extern "C" int be_OT_netdata_services(bvm *vm) {
   be_return(vm);
 }
 
-// ESP-IDF 802.15.4 coexistence config. Declared locally to avoid pulling the
-// private esp_coex / esp_ieee802154 headers into this .ino. The struct layout
-// matches esp_ieee802154_coex_config_t { idle, txrx, txrx_at } and the symbol
-// has C linkage (libieee802154.a / esp_ieee802154.c).
-// ieee802154_coex_event_t levels: HIGH=1, MIDDLE=2, LOW=3, IDLE=4.
-//
-// NOTE: the real function returns void and takes the struct BY VALUE.
-// The earlier declaration was esp_err_t with a pointer parameter, which silently
-// corrupted the configuration on RISC-V (pointer address was read as config value).
-typedef struct {
-  int idle;
-  int txrx;
-  int txrx_at;
-} ot_coex_config_t;
-extern "C" void esp_ieee802154_set_coex_config(ot_coex_config_t config);
-
-// OT.coex_prefer_thread(prefer) - bias the 802.15.4 / Wi-Fi coexistence toward Thread.
-//
-// ESP32-C6 shares a single 2.4 GHz RF between Wi-Fi, BLE, and 802.15.4 (Thread)
-// via a priority-based time-division scheduler. By default the 802.15.4 normal
-// receive operation is assigned the LOWEST priority, so Wi-Fi/BLE take the RF
-// whenever they need it; that can starve Thread retransmissions and cause CASE
-// timeouts / SRP registration timeouts.
-//
-// The Wi-Fi/BT preference enum (esp_coex_preference_set) does NOT cover
-// 802.15.4 — it only arbitrates Wi-Fi vs. Bluetooth. 802.15.4 coexistence is a
-// separate mechanism driven by per-event priorities (PTI). We raise the
-// 802.15.4 priorities via esp_ieee802154_set_coex_config() so Thread frames win
-// arbitration; passing false restores the ESP-IDF defaults.
-//
-// Args:
-//   prefer : true → raise 802.15.4 priority (idle/txrx/txrx_at = HIGH)
-//            false → restore defaults (idle=IDLE, txrx=LOW, txrx_at=MIDDLE)
-//
-// Returns true on success.
-extern "C" int be_OT_coex_prefer_thread(bvm *vm) {
-  int argc = be_top(vm);
-  if (argc < 1) {
-    be_raise(vm, kTypeError, "OT: coex_prefer_thread needs 1 arg (bool)");
-  }
-  bool prefer_thread = be_tobool(vm, 1);
-
-  ot_coex_config_t cfg;
-  if (prefer_thread) {
-    cfg = (ot_coex_config_t){ /*idle*/1, /*txrx*/1, /*txrx_at*/1 };   // all HIGH
-  } else {
-    cfg = (ot_coex_config_t){ /*idle*/4, /*txrx*/3, /*txrx_at*/2 };   // IDLE / LOW / MIDDLE (defaults)
-  }
-  esp_ieee802154_set_coex_config(cfg);  // void, pass by value
-
-  AddLog(LOG_LEVEL_INFO, PSTR("OT : 802.15.4 coex priority set to %s"),
-         prefer_thread ? "thread (high)" : "default");
-  be_pushbool(vm, true);
-  be_return(vm);
-}
-
-// OT.radio_reclaim() — re-enable 802.15.4 radio after WiFi PHY shutdown
-extern "C" int be_OT_radio_reclaim(bvm *vm) {
+extern "C" void be_OT_radio_reclaim(void) {
   bt_radio_reclaim();
-  be_return(vm);
 }
 
 
@@ -574,42 +399,12 @@ static void ot_udp_receive_callback(void *aContext, void *aMessage, const void *
   }
 }
 
-// ---- SRP UDP receive callback (separate queue, dedicated SRP socket) ----
-static void ot_udp_srp_receive_callback(void *aContext, void *aMessage, const void *aMessageInfo) {
-  otMessage *msg = (otMessage *)aMessage;
-  const otMessageInfo *info = (const otMessageInfo *)aMessageInfo;
-
-  uint16_t offset = otMessageGetOffset(msg);
-  uint16_t length = otMessageGetLength(msg) - offset;
-  if (length == 0 || length > OT_UDP_RX_BUF_SIZE) {
-    AddLog(LOG_LEVEL_DEBUG, PSTR("OT : SRP UDP rx dropped, len=%d"), length);
-    return;
-  }
-
-  if (!OT_State.udp_srp_rx_queue) return;
-
-  static ot_udp_rx_packet_t pkt;
-  pkt.len = otMessageRead(msg, offset, pkt.data, length);
-  otIp6AddressToString(&info->mPeerAddr, pkt.addr, sizeof(pkt.addr));
-  pkt.port = info->mPeerPort;
-
-  if (xQueueSend(OT_State.udp_srp_rx_queue, &pkt, 0) != pdTRUE) {
-    AddLog(LOG_LEVEL_DEBUG, PSTR("OT : SRP UDP rx queue full, dropped"));
-  }
-}
-
 // ---- OT.udp_open(port) ----
-extern "C" int be_OT_udp_open(bvm *vm) {
-  int argc = be_top(vm);
-  if (argc < 1 || !be_isint(vm, 1)) {
-    be_raise(vm, kTypeError, nullptr);
-  }
-  uint16_t port = (uint16_t)be_toint(vm, 1);
-
+extern "C" void be_OT_udp_open(struct bvm *vm, int32_t port) {
   otInstance *instance = (otInstance*)ot_lock_and_get();
   if (!instance) {
     be_raisef(vm, "ot_error", "OT: not initialized");
-    be_return_nil(vm);
+    return;
   }
 
   if (OT_State.udp_open) {
@@ -623,18 +418,18 @@ extern "C" int be_OT_udp_open(bvm *vm) {
   if (error != OT_ERROR_NONE) {
     ot_unlock();
     be_raisef(vm, "ot_error", "OT: udp_open failed: %d", error);
-    be_return_nil(vm);
+    return;
   }
 
   otSockAddr sockaddr;
   memset(&sockaddr, 0, sizeof(sockaddr));
-  sockaddr.mPort = port;
+  sockaddr.mPort = (uint16_t)port;
   error = otUdpBind(instance, &OT_State.udp_socket, &sockaddr, OT_NETIF_THREAD_INTERNAL);
   if (error != OT_ERROR_NONE) {
     otUdpClose(instance, &OT_State.udp_socket);
     ot_unlock();
     be_raisef(vm, "ot_error", "OT: udp_bind failed: %d", error);
-    be_return_nil(vm);
+    return;
   }
 
   if (!OT_State.udp_rx_queue) {
@@ -645,38 +440,27 @@ extern "C" int be_OT_udp_open(bvm *vm) {
   ot_unlock();
 
   AddLog(LOG_LEVEL_INFO, PSTR("OT : UDP socket opened on port %d"), port);
-  be_return_nil(vm);
 }
 
 // ---- OT.udp_send(addr, port, payload) ----
-extern "C" int be_OT_udp_send(bvm *vm) {
-  int argc = be_top(vm);
-  if (argc < 3 || !be_isstring(vm, 1) || !be_isint(vm, 2) || !be_isbytes(vm, 3)) {
-    be_raise(vm, kTypeError, nullptr);
-  }
-
-  const char *addr_str = be_tostring(vm, 1);
-  uint16_t port = (uint16_t)be_toint(vm, 2);
-  size_t payload_len;
-  const uint8_t *payload = (const uint8_t *)be_tobytes(vm, 3, &payload_len);
-
+extern "C" void be_OT_udp_send(struct bvm *vm, const char *addr_str, int32_t port, const uint8_t *payload, size_t payload_len) {
   otInstance *instance = (otInstance*)ot_lock_and_get();
   if (!instance) {
     be_raisef(vm, "ot_error", "OT: not initialized");
-    be_return_nil(vm);
+    return;
   }
 
   if (!OT_State.udp_open) {
     ot_unlock();
     be_raisef(vm, "ot_error", "OT: UDP socket not open");
-    be_return_nil(vm);
+    return;
   }
 
   otMessage *message = otUdpNewMessage(instance, nullptr);
   if (!message) {
     ot_unlock();
     be_raisef(vm, "ot_error", "OT: udp_send no message buffer");
-    be_return_nil(vm);
+    return;
   }
 
   otError error = otMessageAppend(message, payload, (uint16_t)payload_len);
@@ -684,24 +468,22 @@ extern "C" int be_OT_udp_send(bvm *vm) {
     otMessageFree(message);
     ot_unlock();
     be_raisef(vm, "ot_error", "OT: udp_send append failed: %d", error);
-    be_return_nil(vm);
+    return;
   }
 
   otMessageInfo messageInfo;
   memset(&messageInfo, 0, sizeof(messageInfo));
   otIp6AddressFromString(addr_str, &messageInfo.mPeerAddr);
-  messageInfo.mPeerPort = port;
+  messageInfo.mPeerPort = (uint16_t)port;
 
   error = otUdpSend(instance, &OT_State.udp_socket, message, &messageInfo);
   if (error != OT_ERROR_NONE) {
     otMessageFree(message);
     ot_unlock();
     be_raisef(vm, "ot_error", "OT: udp_send failed: %d", error);
-    be_return_nil(vm);
+    return;
   }
   ot_unlock();
-
-  be_return_nil(vm);
 }
 
 // ---- OT.udp_poll() -> [bytes, addr_string, port] or nil ----
@@ -745,154 +527,6 @@ extern "C" void be_OT_udp_close(struct bvm *vm) {
     otUdpClose(instance, &OT_State.udp_socket);
     OT_State.udp_open = false;
     AddLog(LOG_LEVEL_INFO, PSTR("OT : UDP socket closed"));
-  }
-  ot_unlock();
-}
-
-// ---- SRP dedicated socket ------------------------------------------------
-
-// ---- OT.udp_srp_open() ----
-extern "C" int be_OT_udp_srp_open(bvm *vm) {
-  (void)vm;
-  otInstance *instance = (otInstance*)ot_lock_and_get();
-  if (!instance) {
-    be_raisef(vm, "ot_error", "OT: not initialized");
-    be_return_nil(vm);
-  }
-
-  if (OT_State.udp_srp_open) {
-    otUdpClose(instance, &OT_State.udp_srp_socket);
-    OT_State.udp_srp_open = false;
-  }
-
-  memset(&OT_State.udp_srp_socket, 0, sizeof(OT_State.udp_srp_socket));
-  otError error = otUdpOpen(instance, &OT_State.udp_srp_socket,
-                            (otUdpReceive)ot_udp_srp_receive_callback, nullptr);
-  if (error != OT_ERROR_NONE) {
-    ot_unlock();
-    be_raisef(vm, "ot_error", "OT: udp_srp_open failed: %d", error);
-    be_return_nil(vm);
-  }
-
-  otSockAddr sockaddr;
-  memset(&sockaddr, 0, sizeof(sockaddr));
-  sockaddr.mPort = 0;  // ephemeral port
-  error = otUdpBind(instance, &OT_State.udp_srp_socket, &sockaddr, OT_NETIF_THREAD_INTERNAL);
-  if (error != OT_ERROR_NONE) {
-    otUdpClose(instance, &OT_State.udp_srp_socket);
-    ot_unlock();
-    be_raisef(vm, "ot_error", "OT: udp_srp_bind failed: %d", error);
-    be_return_nil(vm);
-  }
-
-  if (!OT_State.udp_srp_rx_queue) {
-    OT_State.udp_srp_rx_queue = xQueueCreate(OT_UDP_RX_QUEUE_LEN, sizeof(ot_udp_rx_packet_t));
-  }
-
-  OT_State.udp_srp_open = true;
-  ot_unlock();
-
-  AddLog(LOG_LEVEL_INFO, PSTR("OT : SRP UDP socket opened"));
-  be_return_nil(vm);
-}
-
-// ---- OT.udp_srp_send(addr, port, payload) ----
-extern "C" int be_OT_udp_srp_send(bvm *vm) {
-  int argc = be_top(vm);
-  if (argc < 3 || !be_isstring(vm, 1) || !be_isint(vm, 2) || !be_isbytes(vm, 3)) {
-    be_raise(vm, kTypeError, nullptr);
-  }
-
-  const char *addr_str = be_tostring(vm, 1);
-  uint16_t port = (uint16_t)be_toint(vm, 2);
-  size_t payload_len;
-  const uint8_t *payload = (const uint8_t *)be_tobytes(vm, 3, &payload_len);
-
-  otInstance *instance = (otInstance*)ot_lock_and_get();
-  if (!instance) {
-    be_raisef(vm, "ot_error", "OT: not initialized");
-    be_return_nil(vm);
-  }
-
-  if (!OT_State.udp_srp_open) {
-    ot_unlock();
-    be_raisef(vm, "ot_error", "OT: SRP UDP socket not open");
-    be_return_nil(vm);
-  }
-
-  otMessage *message = otUdpNewMessage(instance, nullptr);
-  if (!message) {
-    ot_unlock();
-    be_raisef(vm, "ot_error", "OT: udp_srp_send no message buffer");
-    be_return_nil(vm);
-  }
-
-  otError error = otMessageAppend(message, payload, (uint16_t)payload_len);
-  if (error != OT_ERROR_NONE) {
-    otMessageFree(message);
-    ot_unlock();
-    be_raisef(vm, "ot_error", "OT: udp_srp_send append failed: %d", error);
-    be_return_nil(vm);
-  }
-
-  otMessageInfo messageInfo;
-  memset(&messageInfo, 0, sizeof(messageInfo));
-  otIp6AddressFromString(addr_str, &messageInfo.mPeerAddr);
-  messageInfo.mPeerPort = port;
-
-  error = otUdpSend(instance, &OT_State.udp_srp_socket, message, &messageInfo);
-  if (error != OT_ERROR_NONE) {
-    otMessageFree(message);
-    ot_unlock();
-    be_raisef(vm, "ot_error", "OT: udp_srp_send failed: %d", error);
-    be_return_nil(vm);
-  }
-  ot_unlock();
-
-  be_return_nil(vm);
-}
-
-// ---- OT.udp_srp_poll() -> [bytes, addr_string, port] or nil ----
-extern "C" int be_OT_udp_srp_poll(bvm *vm) {
-  if (!OT_State.udp_srp_rx_queue) {
-    be_return_nil(vm);
-  }
-
-  static ot_udp_rx_packet_t pkt;
-  if (xQueueReceive(OT_State.udp_srp_rx_queue, &pkt, 0) != pdTRUE) {
-    be_return_nil(vm);
-  }
-
-  be_newobject(vm, "list");
-  // [0] = bytes payload
-  be_pushbytes(vm, pkt.data, pkt.len);
-  be_data_push(vm, -2);
-  be_pop(vm, 1);
-  // [1] = addr string
-  be_pushstring(vm, pkt.addr);
-  be_data_push(vm, -2);
-  be_pop(vm, 1);
-  // [2] = port int
-  be_pushint(vm, pkt.port);
-  be_data_push(vm, -2);
-  be_pop(vm, 1);
-
-  be_pop(vm, 1);  // pop list internal
-  be_return(vm);
-}
-
-// ---- OT.udp_srp_close() ----
-extern "C" void be_OT_udp_srp_close(struct bvm *vm) {
-  otInstance *instance = (otInstance*)ot_lock_and_get();
-  if (!instance) {
-    be_raisef(vm, "ot_error", "OT: not initialized");
-    return;
-  }
-
-  if (OT_State.udp_srp_open) {
-    otUdpClose(instance, &OT_State.udp_srp_socket);
-    OT_State.udp_srp_open = false;
-    AddLog(LOG_LEVEL_INFO, PSTR("OT : SRP UDP socket closed"));
   }
   ot_unlock();
 }
@@ -952,18 +586,11 @@ static bool parse_key_value(const char *entry, char *key, int max_key_len, char 
   return true;
 }
 
-extern "C" int be_OT_srp_set_hostname(bvm *vm) {
-  int argc = be_top(vm);
-  if (argc < 1 || !be_isstring(vm, 1)) {
-    be_raise(vm, "type_error", "OT: srp_set_hostname needs 1 arg (string)");
-    be_return_nil(vm);
-  }
-  const char *hostname = be_tostring(vm, 1);
-
+extern "C" void be_OT_srp_set_hostname(struct bvm *vm, const char *hostname) {
   otInstance *instance = (otInstance*)ot_lock_and_get();
   if (!instance) {
     be_raisef(vm, "ot_error", "OT: not initialized");
-    be_return_nil(vm);
+    return;
   }
 
   strncpy(s_srp_hostname, hostname, sizeof(s_srp_hostname) - 1);
@@ -978,7 +605,6 @@ extern "C" int be_OT_srp_set_hostname(bvm *vm) {
   if (err != OT_ERROR_NONE) {
     be_raisef(vm, "ot_error", "OT: srp_set_hostname failed: %d", err);
   }
-  be_return_nil(vm);
 }
 
 static void log_hex(const char *label, const uint8_t *data, size_t len) {
@@ -992,22 +618,11 @@ static void log_hex(const char *label, const uint8_t *data, size_t len) {
   AddLog(LOG_LEVEL_INFO, PSTR("OT : SRP %s HEX (%zu): %s"), label, len, buf);
 }
 
-extern "C" int be_OT_srp_add_service(bvm *vm) {
-  int argc = be_top(vm);
-  if (argc < 5 || !be_isstring(vm, 1) || !be_isstring(vm, 2) || !be_isint(vm, 3) || !be_isstring(vm, 4) || !be_isstring(vm, 5)) {
-    be_raise(vm, "type_error", "OT: srp_add_service needs (instance_name, service_name, port, subtypes_str, txt_str)");
-    be_return_nil(vm);
-  }
-  const char *instance_name = be_tostring(vm, 1);
-  const char *service_name = be_tostring(vm, 2);
-  int port = be_toint(vm, 3);
-  const char *subtypes_str = be_tostring(vm, 4);
-  const char *txt_str = be_tostring(vm, 5);
-
+extern "C" void be_OT_srp_add_service(struct bvm *vm, const char *instance_name, const char *service_name, int32_t port, const char *subtypes_str, const char *txt_str) {
   otInstance *instance = (otInstance*)ot_lock_and_get();
   if (!instance) {
     be_raisef(vm, "ot_error", "OT: not initialized");
-    be_return_nil(vm);
+    return;
   }
 
   int slot = -1;
@@ -1029,7 +644,6 @@ extern "C" int be_OT_srp_add_service(bvm *vm) {
   if (slot == -1) {
     ot_unlock();
     be_raisef(vm, "ot_error", "OT: srp_add_service: no free slots");
-    be_return_nil(vm);
   }
 
   SrpServiceStorage &storage = s_srp_services[slot];
@@ -1092,22 +706,13 @@ extern "C" int be_OT_srp_add_service(bvm *vm) {
     snprintf(kv, sizeof(kv), "%s=%s", storage.txt_keys[i], storage.txt_values[i]);
     log_hex("txt", (const uint8_t*)kv, strlen(kv));
   }
-  be_return_nil(vm);
 }
 
-extern "C" int be_OT_srp_remove_service(bvm *vm) {
-  int argc = be_top(vm);
-  if (argc < 2 || !be_isstring(vm, 1) || !be_isstring(vm, 2)) {
-    be_raise(vm, "type_error", "OT: srp_remove_service needs (instance_name, service_name)");
-    be_return_nil(vm);
-  }
-  const char *instance_name = be_tostring(vm, 1);
-  const char *service_name = be_tostring(vm, 2);
-
+extern "C" void be_OT_srp_remove_service(struct bvm *vm, const char *instance_name, const char *service_name) {
   otInstance *instance = (otInstance*)ot_lock_and_get();
   if (!instance) {
     be_raisef(vm, "ot_error", "OT: not initialized");
-    be_return_nil(vm);
+    return;
   }
 
   otError err = OT_ERROR_NOT_FOUND;
@@ -1123,7 +728,6 @@ extern "C" int be_OT_srp_remove_service(bvm *vm) {
   if (err != OT_ERROR_NONE && err != OT_ERROR_NOT_FOUND) {
     be_raisef(vm, "ot_error", "OT: srp_remove_service failed: %d", err);
   }
-  be_return_nil(vm);
 }
 
 // ---- SRP client callback ----
@@ -1174,53 +778,33 @@ static void srp_server_state_change(const otSockAddr *aServerSockAddr, void *aCo
   }
 }
 
-extern "C" int be_OT_srp_start(bvm *vm) {
-  // Auto-start is used instead of manual start (enabled in be_OT_init).
-  // If Berry code calls us (legacy path), enable auto-start so the
-  // client still functions, but the manual address is ignored.
+extern "C" void be_OT_srp_start(struct bvm *vm) {
   otInstance *instance = (otInstance*)ot_lock_and_get();
   if (!instance) {
     be_raisef(vm, "ot_error", "OT: not initialized");
-    be_return_nil(vm);
+    return;
   }
-  // Ensure auto-start is enabled (idempotent)
   otSrpClientEnableAutoStartMode(instance, srp_server_state_change, nullptr);
   ot_unlock();
   AddLog(LOG_LEVEL_DEBUG, PSTR("OT : srp_start called (auto-start mode, manual address ignored)"));
-  be_return_nil(vm);
 }
 
-extern "C" int be_OT_srp_disable_autostart(bvm *vm) {
-  // No-op: auto-start is required (matches esp-matter's flow).
-  // Manual start has been replaced by auto-start mode.
-  be_return_nil(vm);
-}
-
-extern "C" int be_OT_srp_set_lease_interval(bvm *vm) {
-  int argc = be_top(vm);
-  if (argc < 2 || !be_isint(vm, 1) || !be_isint(vm, 2)) {
-    be_raise(vm, "type_error", "OT: srp_set_lease_interval needs (lease_interval, key_lease_interval)");
-    be_return_nil(vm);
-  }
-  uint32_t lease = be_toint(vm, 1);
-  uint32_t key_lease = be_toint(vm, 2);
-
+extern "C" void be_OT_srp_set_lease_interval(struct bvm *vm, int32_t lease, int32_t key_lease) {
   otInstance *instance = (otInstance*)ot_lock_and_get();
   if (!instance) {
     be_raisef(vm, "ot_error", "OT: not initialized");
-    be_return_nil(vm);
+    return;
   }
-  otSrpClientSetLeaseInterval(instance, lease);
-  otSrpClientSetKeyLeaseInterval(instance, key_lease);
+  otSrpClientSetLeaseInterval(instance, (uint32_t)lease);
+  otSrpClientSetKeyLeaseInterval(instance, (uint32_t)key_lease);
   ot_unlock();
-  be_return_nil(vm);
 }
 
-extern "C" int be_OT_srp_stop(bvm *vm) {
+extern "C" void be_OT_srp_stop(struct bvm *vm) {
   otInstance *instance = (otInstance*)ot_lock_and_get();
   if (!instance) {
     be_raisef(vm, "ot_error", "OT: not initialized");
-    be_return_nil(vm);
+    return;
   }
 
   otSrpClientClearHostAndServices(instance);
@@ -1228,21 +812,19 @@ extern "C" int be_OT_srp_stop(bvm *vm) {
     s_srp_services[i].in_use = false;
   }
   ot_unlock();
-  be_return_nil(vm);
 }
 
-extern "C" int be_OT_srp_is_running(bvm *vm) {
+extern "C" bbool be_OT_srp_is_running(void) {
   otInstance *instance = (otInstance*)ot_lock_and_get();
-  bool running = false;
+  bbool running = bfalse;
   if (instance) {
-    running = otSrpClientIsRunning(instance);
+    running = otSrpClientIsRunning(instance) ? btrue : bfalse;
   }
   ot_unlock();
-  be_pushbool(vm, running);
-  be_return(vm);
+  return running;
 }
 
-extern "C" int be_OT_srp_get_host_state(bvm *vm) {
+extern "C" const char* be_OT_srp_get_host_state(void) {
   otInstance *instance = (otInstance*)ot_lock_and_get();
   const char *state_str = "unknown";
   if (instance) {
@@ -1252,31 +834,24 @@ extern "C" int be_OT_srp_get_host_state(bvm *vm) {
     }
   }
   ot_unlock();
-  be_pushstring(vm, state_str);
-  be_return(vm);
+  return state_str;
 }
 
-extern "C" int be_OT_srp_get_server(bvm *vm) {
+extern "C" const char* be_OT_srp_get_server(void) {
   otInstance *instance = (otInstance*)ot_lock_and_get();
-  char server_str[80] = {0};
-  bool has_server = false;
+  const char *result = NULL;
   if (instance) {
     const otSockAddr *addr = otSrpClientGetServerAddress(instance);
     if (addr && addr->mPort > 0) {
+      static char server_str[80];
       char ip_str[46];
       otIp6AddressToString(&addr->mAddress, ip_str, sizeof(ip_str));
       snprintf(server_str, sizeof(server_str), "[%s]:%d", ip_str, addr->mPort);
-      has_server = true;
+      result = server_str;
     }
   }
   ot_unlock();
-  if (has_server) {
-    be_pushstring(vm, server_str);
-  } else {
-    be_pushnil(vm);
-  }
-  be_return(vm);
+  return result;
 }
-
 #endif  // USE_MATTER_THREAD
 #endif  // USE_BERRY

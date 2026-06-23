@@ -717,9 +717,16 @@ class Matter_Plugin_Root : Matter_Plugin
     # ====================================================================================================
     elif cluster == 0x0038              # ========== Time Synchronization 11.16 p.689 ==========
       if   attribute == 0x0000          #  ---------- UTCTime / epoch_us ----------
-        var epoch_us = int64(tasmota.rtc_utc()) * int64(1000000)
+        var utc = tasmota.rtc_utc()
+        if utc < 1451602800            # START_VALID_TIME (2016-01-01) - time not synced yet
+          return tlv_solo.set(0x14 #-TLV.NULL-#, nil)     # report null so controller re-pushes time
+        end
+        var epoch_us = int64(utc) * int64(1000000)
         return tlv_solo.set(0x07 #-TLV.U8-#, epoch_us)     # TODO test the conversion of int64()
       elif attribute == 0x0001          #  ---------- Granularity / enum ----------
+        if tasmota.rtc_utc() < 1451602800   # START_VALID_TIME (2016-01-01) - time not synced yet
+          return tlv_solo.set(0x04 #-TLV.U1-#, 0)     # NoTimeGranularity - device has no valid time
+        end
         return tlv_solo.set(0x04 #-TLV.U1-#, 3)     # MillisecondsGranularity (NTP every hour, i.e. 36ms max drift)
       # TODO add some missing args
       elif attribute == 0x0007          #  ---------- LocalTime / epoch_us ----------

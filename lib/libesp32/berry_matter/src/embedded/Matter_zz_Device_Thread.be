@@ -119,17 +119,13 @@ class Matter_Device_Thread : Matter_Device_BLE
                 tasmota.cmd("wifi 0")
                 self.pending_radio_reclaim = true
                 tasmota.add_fast_loop(/-> BLE.loop())
-                self.init_light()
+                self.on_ble_init()
                 self.ble_ready = true
                 log(format("MTR: start MATTER Thread+BLE commissionee, discriminator:%i", self.root_discriminator), 1)
             except .. as e, m
                 log(format("MTR: BLE init FAILED — device cannot be commissioned via BLE: %s %s", str(e), str(m)), 2)
             end
         end
-    end
-
-    # Default empty hook — overridden in root script for app-specific feedback
-    def init_light()
     end
 
     #############################################################
@@ -318,12 +314,10 @@ class Matter_Device_Thread : Matter_Device_BLE
         if self.thread_dataset != nil && !self.thread_connected
             return
         end
-        if self.sessions.count_active_fabrics() > 0
+        var fabric_count = self.sessions.count_active_fabrics()
+        if fabric_count > 0
             log("MTR: Successfully finished BLE commissioning.")
-            if self.have_light
-                import light
-                light.set({'bri':50,'hue':120})
-            end
+            self.on_commissioning_success({'reason': self.REASON_SUCCESS, 'detail': '', 'fabric_count': fabric_count})
             self.check_if_commissioned = false
             return
         end
@@ -338,8 +332,7 @@ class Matter_Device_Thread : Matter_Device_BLE
                 return
             end
             log("MTR: commissioning failure (CASE did not complete)")
-            try  import OT  OT.srp_stop()  except .. end
-            tasmota.cmd("restart 1")
+            self.on_commissioning_failure({'reason': self.REASON_CASE_FAILED, 'detail': 'CASE did not complete', 'fabric_count': 0})
         else
             log("MTR: commissioning ended without AddNOC, no fabric expected", 3)
         end
