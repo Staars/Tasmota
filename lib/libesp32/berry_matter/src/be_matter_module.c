@@ -278,6 +278,15 @@ extern const bclass be_class_Matter_TLV;   // need to declare it upfront because
 #include "solidify/solidified_Matter_zz_Device_BLE.h"
 #endif //USE_MI_EXT_GUI
 
+#if defined(USE_MATTER_THREAD) && !defined(USE_MI_EXT_GUI)
+#error "USE_MATTER_THREAD requires USE_MI_EXT_GUI (BLE/BTP support)"
+#endif
+#if USE_MATTER_THREAD
+#include "solidify/solidified_Matter_Plugin_1_z_Root_Thread.h"
+#include "solidify/solidified_Matter_z_Commissioning_Thread.h"
+#include "solidify/solidified_Matter_zz_Device_Thread.h"
+#endif //USE_MATTER_THREAD
+
 #include "solidify/solidified_Matter_zz_Device.h"
 
 #include "be_fixed_matter.h"
@@ -433,6 +442,7 @@ module matter (scope: global, strings: weak) {
 
   // Commissioning
   Commissioning, class(be_class_Matter_Commissioning)
+  Commissioning_Thread, class(be_class_Matter_Thread_Commissioning), USE_MATTER_THREAD  // Thread variant
   Autoconf, class(be_class_Matter_Autoconf)
 
   // QR Code
@@ -447,6 +457,8 @@ module matter (scope: global, strings: weak) {
   // optional Matter BLE Device core class
   Device_BLE, class(be_class_Matter_Device_BLE), USE_MI_EXT_GUI
 
+  // optional Matter Thread Device core class
+  Device_Thread, class(be_class_Matter_Device_Thread), USE_MATTER_THREAD
 
   // Matter Device core class
   Device, class(be_class_Matter_Device)
@@ -456,6 +468,7 @@ module matter (scope: global, strings: weak) {
 
   // Plugins - only the core classes, all others are taken from `matter_device.plugins_classes`
   Plugin_Root, class(be_class_Matter_Plugin_Root)       // Generic behavior common to all devices
+  Plugin_Root_Thread, class(be_class_Matter_Plugin_Root_Thread), USE_MATTER_THREAD  // Thread variant of Root (Network Commissioning over Thread)
   Plugin_Aggregator, class(be_class_Matter_Plugin_Aggregator) // Aggregator
   Plugin_Device, class(be_class_Matter_Plugin_Device)       // Device
 }
