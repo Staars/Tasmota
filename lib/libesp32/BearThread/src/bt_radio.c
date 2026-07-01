@@ -126,18 +126,6 @@ esp_err_t bt_radio_init(void)
     return ESP_OK;
 }
 
-void bt_radio_reclaim(void)
-{
-    if (!s_radio_initialized) return;
-    esp_ieee802154_enable();
-    esp_ieee802154_set_panid(s_panid);
-    esp_ieee802154_set_extended_address(s_extaddr);
-    esp_ieee802154_set_short_address(s_shortaddr);
-    esp_ieee802154_set_rx_when_idle(true);
-    esp_ieee802154_set_channel(s_channel);
-    esp_ieee802154_receive();
-}
-
 void bt_radio_deinit(void)
 {
     if (s_radio_event_fd >= 0) {

@@ -28,7 +28,7 @@ import matter
 # BLE GATT bring-up, BTP wiring, GATT event dispatcher and message
 # multiplexing. Overrides the transport layer to use OpenThread UDP instead of
 # Wi-Fi UDP, adds native OT SRP client management, and provides Thread network
-# lifecycle (dataset provisioning, role tracking, radio reclaim).
+# lifecycle (dataset provisioning, role tracking).
 #
 # When the device is already commissioned, BLE is skipped entirely and the
 # device rejoins Thread directly from persisted OT settings.
@@ -41,8 +41,6 @@ class Matter_Device_Thread : Matter_Device_BLE
     var _srp_fabrics                   # list: fabrics collected during commissioning (before start)
     var case_grace_until               # int millis: deadline to wait for CASE after AddNOC
     var packets_sent                   # list: OT UDP packets awaiting ack (retransmission)
-    var pending_radio_reclaim
-    var wifi_was_up                    # bool: last known WiFi state (for detecting OFF transitions)
     var ot_started                     # bool: OpenThread initialized
     var thread_connected               # bool: Thread network attached
 
@@ -75,7 +73,6 @@ class Matter_Device_Thread : Matter_Device_BLE
         self.tick = 0
         self.message_handler = matter.MessageHandler(self)
         self.events = matter.EventHandler(self)
-        self.pending_radio_reclaim = false
         self.autoconf_device()
         tasmota.add_driver(self)
 
@@ -117,7 +114,6 @@ class Matter_Device_Thread : Matter_Device_BLE
                 self.btp = matter.BTP(self)
                 self.commissioning.init_basic_commissioning()
                 tasmota.cmd("wifi 0")
-                self.pending_radio_reclaim = true
                 tasmota.add_fast_loop(/-> BLE.loop())
                 self.on_ble_init()
                 self.ble_ready = true
@@ -621,21 +617,6 @@ class Matter_Device_Thread : Matter_Device_BLE
             except .. as e, m
                 log(format("MTR: OT state poll FAILED: %s %s", str(e), str(m)), 2)
             end
-        end
-        # radio reclaim on WiFi OFF transition
-        if self.ot_started
-            var wifi_up = tasmota.wifi().find("up") == true
-            if (self.pending_radio_reclaim || (self.wifi_was_up && !wifi_up)) && !wifi_up
-                try
-                    import OT
-                    OT.radio_reclaim()
-                    log("MTR: 802.15.4 radio reclaimed after WiFi shutdown", 2)
-                except .. as e, m
-                    log(format("MTR: radio reclaim FAILED: %s %s", str(e), str(m)), 2)
-                end
-            end
-            self.pending_radio_reclaim = false
-            self.wifi_was_up = wifi_up
         end
         # OT UDP receive
         if self.started
