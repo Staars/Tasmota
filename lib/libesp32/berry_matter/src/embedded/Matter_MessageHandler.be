@@ -220,7 +220,7 @@ class Matter_MessageHandler
             self.im.send_enqueued(self)
 
           else
-            self.send_encrypted_ack(frame, true #-reliable-#)
+            self.send_encrypted_ack(frame, false #- not reliable-#)
           end
           ret = true
 

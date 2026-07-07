@@ -370,10 +370,6 @@ extern "C" int be_OT_netdata_services(bvm *vm) {
   be_return(vm);
 }
 
-extern "C" void be_OT_radio_reclaim(void) {
-  bt_radio_reclaim();
-}
-
 
 // ---- UDP receive callback (runs in OT task context) ----
 static void ot_udp_receive_callback(void *aContext, void *aMessage, const void *aMessageInfo) {

@@ -49,7 +49,6 @@ esp_err_t bt_launch_mainloop(void);
 /* ---- Radio platform ---- */
 esp_err_t bt_radio_init(void);
 void      bt_radio_deinit(void);
-void      bt_radio_reclaim(void);
 void      bt_radio_update(fd_set *read_fds, int *max_fd);
 esp_err_t bt_radio_process(otInstance *instance, const fd_set *read_fds);
 

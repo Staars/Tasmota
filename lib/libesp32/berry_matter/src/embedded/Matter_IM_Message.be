@@ -506,6 +506,12 @@ class Matter_IM_ReportDataSubscribed_Pull : Matter_IM_ReportData_Pull
     else
       self.sub.re_arm()                       # always re_arm at last StatusReport. The only case where it does not happen is during keep-alive, hence we need to lookg for Ack (see above)
       super(self).status_ok_received(nil)
+      # The subscription transaction is complete once the terminal StatusResponse
+      # arrives. Mark the message `finished` so `process_status_response` removes
+      # it from the send_queue. Do NOT rely on a reliable standalone ack round-trip
+      # for cleanup (the ack is now sent unreliably per spec, so no ack comes back
+      # and the message would otherwise expire and tear down the subscription).
+      self.finished = true
       return false                            # let the caller to the ack
     end
   end

@@ -29,9 +29,6 @@ extern int be_OT_get_ipaddr(bvm *vm);
 extern int be_OT_netdata_services(bvm *vm);
 extern int be_OT_poll_state(bvm *vm);
 
-extern void be_OT_radio_reclaim(void);
-BE_FUNC_CTYPE_DECLARE(be_OT_radio_reclaim, "", "");
-
 extern void be_OT_udp_open(struct bvm *vm, int32_t port);
 BE_FUNC_CTYPE_DECLARE(be_OT_udp_open, "", "@i");
 
@@ -82,7 +79,6 @@ module OT (scope: global) {
   get_ipaddr,     func(be_OT_get_ipaddr)
   poll_state,     func(be_OT_poll_state)
   netdata_services, func(be_OT_netdata_services)
-  radio_reclaim,  ctype_func(be_OT_radio_reclaim)
   udp_open,       ctype_func(be_OT_udp_open)
   udp_send,       ctype_func(be_OT_udp_send)
   udp_poll,       func(be_OT_udp_poll)

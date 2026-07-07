@@ -43,6 +43,24 @@ class Matter_Device_Thread : Matter_Device_BLE
     var packets_sent                   # list: OT UDP packets awaiting ack (retransmission)
     var ot_started                     # bool: OpenThread initialized
     var thread_connected               # bool: Thread network attached
+    var ot_no_bufs_since               # int millis: start of current OT buffer-exhaustion spell, or nil
+
+    # OT message-buffer exhaustion (NO_BUFS) handling.
+    # A NO_BUFS on udp_send is a *local* enqueue failure (OpenThread's message
+    # buffer pool is momentarily full), not an over-the-air loss. We retry the
+    # same packet soon WITHOUT consuming a Matter/MRP retry, bounded to
+    # OT_NO_BUFS_MAX_MS so we can't retry forever.
+    static var OT_NO_BUFS_RETRY_MS = 250       # short backoff while buffers are busy
+    static var OT_NO_BUFS_MAX_MS = 5000        # give up local-retry after this and fall back to normal retry/drop
+    static var OT_NO_BUFS_IM_GRACE_MS = 1000   # keep matching IM exchange alive a bit longer while buffers are busy
+
+    # Thread meshes routinely stall for several seconds during link repair / MLE
+    # churn, far longer than Wi-Fi. The default 5-retry MRP window (~5s) plus the
+    # 5s IM MSG_TIMEOUT tears subscriptions down before the mesh heals. Extend the
+    # retransmit tail (retries 0..7 => ~13s window) and, on each resend, push the
+    # matching IM exchange's expiration forward so it survives the whole window.
+    static var OT_MAX_RETRIES = 7              # retries 0..7 (8 transmissions), ~13s total window
+    static var OT_RESEND_IM_GRACE_MS = 8000    # keep matching IM exchange alive across the largest tail gap
 
     #############################################################
     # init — full custom, does NOT call super.init()
@@ -81,6 +99,7 @@ class Matter_Device_Thread : Matter_Device_BLE
         self.thread_connected = false
         self.srp_host_announced = false
         self.packets_sent = []
+        self.ot_no_bufs_since = nil
         try
             import OT
             self.ot_started = true
@@ -206,6 +225,7 @@ class Matter_Device_Thread : Matter_Device_BLE
         import OT
         OT.udp_open(self.UDP_PORT)
         self.packets_sent = []
+        self.ot_no_bufs_since = nil
         self._start_srp_client()
         self.srp_announce_hostnames()
         tasmota.set_timer(2000, /-> self._log_srp_state())
@@ -234,8 +254,15 @@ class Matter_Device_Thread : Matter_Device_BLE
             var packet = matter.UDPPacket_sent(msg)
             try
                 OT.udp_send(packet.addr, packet.port, packet.raw)
+                self.ot_no_bufs_since = nil       # a successful send means the OT buffer pool is not exhausted
                 if tasmota.loglevel(4)
-                    log(format("MTR: OT UDP sent %i bytes to [%s]:%i", size(packet.raw), packet.addr, packet.port), 4)
+                    log(format("MTR: OT UDP sent %i bytes op=0x%02X exch=%i i=%i r=%i a=%i id=%i to [%s]:%i",
+                        size(packet.raw),
+                        (msg.opcode != nil) ? msg.opcode : 0xFF,
+                        (msg.exchange_id != nil) ? msg.exchange_id : -1,
+                        msg.x_flag_i ? 1 : 0, msg.x_flag_r ? 1 : 0, msg.x_flag_a ? 1 : 0,
+                        (msg.message_counter != nil) ? msg.message_counter : -1,
+                        packet.addr, packet.port), 4)
                 end
             except .. as e, m
                 log(format("MTR: OT UDP send FAILED: %s %s", str(e), str(m)), 2)
@@ -280,23 +307,100 @@ class Matter_Device_Thread : Matter_Device_BLE
         while idx < size(self.packets_sent) && idx < 4
             var packet = self.packets_sent[idx]
             if tasmota.time_reached(packet.next_try)
-                if packet.retries <= 5
-                    log(format("MTR: OT UDP resend id=%i retry=%i", packet.msg_id, packet.retries), 3)
+                if packet.retries <= self.OT_MAX_RETRIES
+                    log(format("MTR: OT UDP resend id=%i exch=%i retry=%i", packet.msg_id, packet.exchange_id, packet.retries), 3)
+                    var sent = false
+                    var no_bufs = false
                     try
                         OT.udp_send(packet.addr, packet.port, packet.raw)
+                        sent = true
                     except .. as e, m
-                        log(format("MTR: OT UDP resend FAILED: %s %s", str(e), str(m)), 2)
+                        if self._ot_send_is_no_bufs(e, m)
+                            no_bufs = true
+                        else
+                            log(format("MTR: OT UDP resend FAILED: %s %s", str(e), str(m)), 2)
+                        end
                     end
-                    packet.next_try = tasmota.millis() + matter.UDPServer._backoff_time(packet.retries)
-                    packet.retries += 1
-                    idx += 1
+                    if sent
+                        self.ot_no_bufs_since = nil
+                        packet.next_try = tasmota.millis() + matter.UDPServer._backoff_time(packet.retries)
+                        packet.retries += 1
+                        # As long as we are still retransmitting a reliable report
+                        # over the Thread mesh, keep the matching IM exchange alive.
+                        # Thread meshes routinely stall for several seconds (link
+                        # repair, MLE churn); without this the IM layer tears the
+                        # subscription down at MSG_TIMEOUT before the controller's
+                        # reply flushes through, causing a ~21s resubscribe.
+                        self._extend_sendqueue_timeout(packet, self.OT_RESEND_IM_GRACE_MS)
+                        idx += 1
+                    elif no_bufs
+                        # Local OT buffer pool momentarily full: this is NOT an
+                        # over-the-air loss. Retry the same packet soon WITHOUT
+                        # consuming a Matter/MRP retry, bounded to OT_NO_BUFS_MAX_MS.
+                        var now = tasmota.millis()
+                        if self.ot_no_bufs_since == nil   self.ot_no_bufs_since = now   end
+                        if !tasmota.time_reached(self.ot_no_bufs_since + self.OT_NO_BUFS_MAX_MS)
+                            packet.next_try = now + self.OT_NO_BUFS_RETRY_MS
+                            self._extend_sendqueue_timeout(packet, self.OT_NO_BUFS_IM_GRACE_MS)
+                            idx += 1
+                        else
+                            # buffers stuck too long: fall back to normal retry accounting
+                            log(format("MTR: OT UDP no buffers timeout id=%i", packet.msg_id), 2)
+                            self.ot_no_bufs_since = nil
+                            packet.next_try = now + matter.UDPServer._backoff_time(packet.retries)
+                            packet.retries += 1
+                            idx += 1
+                        end
+                    else
+                        # non-NO_BUFS send error: keep existing behavior, consume a retry
+                        packet.next_try = tasmota.millis() + matter.UDPServer._backoff_time(packet.retries)
+                        packet.retries += 1
+                        idx += 1
+                    end
                 else
                     self.packets_sent.remove(idx)
-                    log(format("MTR: OT UDP unacked packet [%s]:%i id=%i", packet.addr, packet.port, packet.msg_id), 3)
+                    log(format("MTR: OT UDP unacked packet [%s]:%i id=%i exch=%i", packet.addr, packet.port, packet.msg_id, packet.exchange_id), 3)
                 end
             else
                 idx += 1
             end
+        end
+    end
+
+    #############################################################
+    # Detect OpenThread local buffer exhaustion (OT_ERROR_NO_BUFS)
+    # raised by OT.udp_send (see be_OT_udp_send in xdrv_52_3_berry_thread.ino)
+    #############################################################
+    def _ot_send_is_no_bufs(e, m)
+        if str(e) != "ot_error"   return false   end
+        import string
+        var em = str(m)
+        return string.find(em, "no message buffer") >= 0 ||
+               string.find(em, "append failed: 3") >= 0 ||
+               string.find(em, "udp_send failed: 3") >= 0
+    end
+
+    #############################################################
+    # While the local OT buffer pool is full, keep the matching IM
+    # exchange alive a bit longer so a recovered local send can still
+    # receive its StatusReport and re_arm() the subscription, instead of
+    # the IM layer tearing the subscription down at MSG_TIMEOUT.
+    #############################################################
+    def _extend_sendqueue_timeout(packet, extra_ms)
+        if packet.exchange_id == nil || packet.exchange_id == 0   return end
+        try
+            if self.message_handler == nil   return end
+            var im = self.message_handler.im
+            if im == nil   return end
+            var message = im.find_sendqueue_by_exchangeid(packet.exchange_id)
+            if message != nil
+                var new_expiration = tasmota.millis() + extra_ms
+                if message.expiration < new_expiration
+                    message.expiration = new_expiration
+                end
+            end
+        except ..
+            # best effort only, never let timeout bookkeeping break UDP resend
         end
     end
 
