@@ -6,6 +6,7 @@ All notable changes to this project will be documented in this file.
 ## [15.5.0.1]
 ### Added
 - Berry `bytes` methods `setbits`/`getbits` transposed to native and support for big endian (#24857)
+- HASPmota ability to set default screen background on `p0b0` object
 
 ### Breaking Changed
 
@@ -13,6 +14,8 @@ All notable changes to this project will be documented in this file.
 - MiElHVAC auto-enable i-See widevane when setting AirDirection (#24860)
 
 ### Fixed
+- BLE EQ3 float output in mqtt messages regression from v15.4.0.2 (#24869)
+- Default button/switch actions on builds without rules regression from v15.4.0.2 (#24871)
 
 ### Removed
 
