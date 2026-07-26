@@ -128,7 +128,7 @@ class Matter_Plugin_Sensor_Boolean : Matter_Plugin_Device
   #
   def update_shadow()
     super(self).update_shadow()
-    if !self.VIRTUAL
+    if !self.VIRTUAL && !self.mqtt_remote
       var switch_str = "Switch" + str(self.tasmota_switch_index)
 
       var j = tasmota.cmd("Status 10", true)
