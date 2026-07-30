@@ -970,30 +970,19 @@ class Matter_UI
     webserver.content_send("<hr><p><b>Discovered MQTT Devices</b></p>"
                            "<div id='mqtt_disc'><i>Subscribing to tasmota/discovery...</i></div>")
 
-    # build list of already-added topics for JS
-    var added_topics = []
-    if self.device.mqtt_remotes != nil
-      for topic: self.device.mqtt_remotes.keys()
-        added_topics.push(topic)
-      end
-    end
-
     webserver.content_send("<script>")
-    webserver.content_send("var addedMqtt=" + json.dump(added_topics) + ";")
     webserver.content_send("function updDisc(d){")
     webserver.content_send("var el=document.getElementById('mqtt_disc');")
     webserver.content_send("if(!el)return;")
     webserver.content_send("var k=Object.keys(d);")
     webserver.content_send("if(!k.length){el.innerHTML='<i>No devices discovered yet. Reboot a Tasmota device on this broker.</i>';return;}")
-    webserver.content_send("var h='<table style=\"width:100%\">';")
-    webserver.content_send("h+='<tr><td style=\"font-size:smaller\"><b>Device</b></td><td style=\"font-size:smaller\"><b>Version</b></td><td style=\"font-size:smaller\"><b>Topic</b></td><td></td></tr>';")
+    webserver.content_send("el.textContent='';var tb=document.createElement('table');tb.style.width='100%';")
+    webserver.content_send("var hr=tb.insertRow();['Device','Version','Topic',''].forEach(function(v){var c=hr.insertCell();c.style.fontSize='smaller';var b=document.createElement('b');b.textContent=v;c.appendChild(b);});")
     webserver.content_send("for(var i=0;i<k.length;i++){")
-    webserver.content_send("var t=k[i],n=d[t];")
-    webserver.content_send("h+='<tr><td>'+n.name+'</td><td>'+n.version+'</td><td>'+t+'</td><td>';")
-    webserver.content_send("if(addedMqtt.indexOf(t)>=0)h+='&#10003; added';")
-    webserver.content_send("else h+=\"<a class='button bgrn' href='/matteradd?topic=\"+encodeURIComponent(t)+\"'>Add</a>\";")
-    webserver.content_send("h+='</td></tr>';}")
-    webserver.content_send("el.innerHTML=h+'</table>';}")
+    webserver.content_send("var t=k[i],n=d[t],r=tb.insertRow();[n.name,n.version,t].forEach(function(v){var c=r.insertCell();c.textContent=v==null?'':v;});var a=r.insertCell();")
+    webserver.content_send("if(n.added)a.textContent='✓ added';")
+    webserver.content_send("else{var l=document.createElement('a');l.className='button bgrn';l.href='/matteradd?topic='+encodeURIComponent(t);l.textContent='Add';a.appendChild(l);}}")
+    webserver.content_send("el.appendChild(tb);}")
     webserver.content_send("setInterval(function(){fetch('/matter_api/disc').then(function(r){return r.json()}).then(updDisc)},1000);")
     webserver.content_send("updDisc({});")
     webserver.content_send("</script><hr>")
@@ -1277,6 +1266,7 @@ class Matter_UI
   #######################################################################
   def page_api_discovered()
     import webserver
+    if !webserver.check_privileged_access() return nil end
     webserver.content_open(200, "application/json")
     webserver.content_send(self.device.get_discovered_mqtt_json())
   end
@@ -1290,16 +1280,14 @@ class Matter_UI
 
     if topic == ''  return end
 
-    # create or get existing MQTT remote for this topic
-    var mqtt_remote = self.device.register_mqtt_remote(topic)
-
     # check if we have discovery data for this topic
     var discovered = self.device.discovered_devices
     if discovered != nil && discovered.contains(topic)
       var config_data = discovered[topic].find('config', {})
-      var config_list = mqtt_remote.generate_config_from_discovery(config_data)
+      var sensors_data = discovered[topic].find('sensors')
+      var config_list = matter.MQTT_remote.generate_config_from_discovery(self.device, config_data, sensors_data)
       if config_list != nil && size(config_list) > 0
-        self.show_mqtt_add_discovered(topic, mqtt_remote, config_list)
+        self.show_mqtt_add_discovered(topic, matter.MQTT_remote.discovery_info(config_data), config_list)
         return
       end
     end
@@ -1312,10 +1300,8 @@ class Matter_UI
   #######################################################################
   def show_mqtt_add_waiting(topic)
     import webserver
-    import json
 
     var topic_html = webserver.html_escape(topic)
-    var topic_json = json.dump(topic)
     webserver.content_send("<fieldset><legend><b>&nbsp;Matter MQTT Remote Device&nbsp;</b></legend><p></p>"
                            "<p><b>Add Remote MQTT sensor or device</b></p>")
 
@@ -1327,9 +1313,10 @@ class Matter_UI
 
     # AJAX polling: check every 1s if device appears in discovery
     webserver.content_send("<script type='text/javascript'>")
+    webserver.content_send("var waitingTopic=new URLSearchParams(location.search).get('topic')||'';")
     webserver.content_send("setInterval(function(){")
     webserver.content_send("  fetch('/matter_api/disc').then(function(r){return r.json()}).then(function(d){")
-    webserver.content_send("    if(d[" + topic_json + "])location.href='/matteradd?topic=" + topic_html + "';")
+    webserver.content_send("    if(d[waitingTopic])location.href='/matteradd?topic='+encodeURIComponent(waitingTopic);")
     webserver.content_send("  })")
     webserver.content_send("},1000);")
     webserver.content_send("</script>")
@@ -1340,9 +1327,10 @@ class Matter_UI
   #######################################################################
   # Show MQTT add page with discovered endpoints
   #######################################################################
-  def show_mqtt_add_discovered(topic, mqtt_remote, config_list)
+  def show_mqtt_add_discovered(topic, info, config_list)
     import webserver
     import json
+    import string
 
     var topic_html = webserver.html_escape(topic)
 
@@ -1350,7 +1338,7 @@ class Matter_UI
     webserver.content_send("<script type='text/javascript'>")
     self.generate_schema_js()
     self.generate_display_names_js([self._CLASSES_TYPES3])
-    webserver.content_send(format("var remtopic=%s;", json.dump(topic)))
+    webserver.content_send("var remtopic=new URLSearchParams(location.search).get('topic')||'';")
     webserver.content_send("</script>")
     webserver.content_send(self._ADD_ENDPOINT_JS)
 
@@ -1360,7 +1348,6 @@ class Matter_UI
     webserver.content_send(f"<p>&#x1F4E1; Topic: <b>{topic_html}</b></p>")
 
     # show device info from discovery
-    var info = mqtt_remote.get_info()
     if info.contains('name')
       webserver.content_send(f"<p>Device: <b>{webserver.html_escape(info.find('name', ''))}</b></p>")
     end
@@ -1382,9 +1369,10 @@ class Matter_UI
       end
       rem_configs.push(entry)
     end
+    # JSON embedded in a script must not contain a literal '<' (for example </script> from a sensor name).
+    var rem_configs_json = string.replace(json.dump(rem_configs), '<', '\\u003C')
     webserver.content_send("<script type='text/javascript'>")
-    webserver.content_send(format("var remcfg=%s;", json.dump(rem_configs)))
-    webserver.content_send(format("var remtopic=%s;", json.dump(topic)))
+    webserver.content_send(format("var remcfg=%s;", rem_configs_json))
     webserver.content_send("</script>")
 
     # Form with hidden JSON field, rendered by JS
@@ -1622,6 +1610,16 @@ class Matter_UI
                   self.device.bridge_add_endpoint(typ, config)
                 end
               end
+            end
+          end
+          # Endpoint construction registers the remote. Attach discovery metadata
+          # only after a configured endpoint exists, then persist it once.
+          if self.device.mqtt_remotes != nil && self.device.mqtt_remotes.contains(topic)
+            var discovered = self.device.discovered_devices.find(topic, {})
+            var discovery_config = discovered.find('config')
+            var mqtt_remote = self.device.mqtt_remotes[topic]
+            if discovery_config != nil && mqtt_remote.set_info_from_discovery(discovery_config)
+              mqtt_remote.info_changed()
             end
           end
           #- and go back to Matter configuration -#

@@ -49,6 +49,7 @@ class Matter_Device
   var mqtt_remotes                    # map of 'topic' to `Matter_MQTT_remote` instance or `nil` if no MQTT bridges
   # MQTT auto-discovery
   var discovered_devices              # map keyed by topic: {config: {...}, sensors: {...}} from tasmota/discovery
+  var discovered_sensors              # map keyed by MAC, allowing retained sensors to arrive before config
   var discovery_subscribed            # true if already subscribed to tasmota/discovery/#
   # saved in parameters
   var root_discriminator              # as `int`
@@ -77,6 +78,7 @@ class Matter_Device
     self.plugins_persist = false                  # plugins need to saved only when the first fabric is associated
     self.plugins_config_remotes = {}
     self.discovered_devices = {}
+    self.discovered_sensors = {}
     self.discovery_subscribed = false
     self.next_ep = self.EP                        # start at endpoint 2 for dynamically allocated endpoints (1 reserved for aggregator)
     self.ipv4only = false
@@ -873,8 +875,10 @@ class Matter_Device
     if j == nil   return   end
 
     # tasmota/discovery/<MAC>/config or tasmota/discovery/<MAC>/sensors
-    var mac_end = string.find(mqtt_topic, "/", 20)
+    var discovery_prefix_len = size("tasmota/discovery/")
+    var mac_end = string.find(mqtt_topic, "/", discovery_prefix_len)
     if mac_end < 0   return   end
+    var mac_part = mqtt_topic[discovery_prefix_len .. mac_end - 1]
     var msg_type = mqtt_topic[mac_end + 1 ..]
 
     if msg_type == "config"
@@ -884,10 +888,20 @@ class Matter_Device
         self.discovered_devices[config_topic] = {}
       end
       self.discovered_devices[config_topic]['config'] = j
+      var config_mac = j.find('mac', mac_part)
+      if self.discovered_sensors.contains(config_mac)
+        self.discovered_devices[config_topic]['sensors'] = self.discovered_sensors[config_mac]
+      end
+      if self.mqtt_remotes != nil && self.mqtt_remotes.contains(config_topic)
+        var mqtt_remote = self.mqtt_remotes[config_topic]
+        if mqtt_remote.set_info_from_discovery(j)
+          mqtt_remote.info_changed()
+        end
+      end
       log(f"MTR: discovered MQTT device '{config_topic}' name='{j.find('dn','?')}'", 3)
 
     elif msg_type == "sensors"
-      var mac_part = mqtt_topic[20 .. mac_end - 1]
+      self.discovered_sensors[mac_part] = j
       for topic: self.discovered_devices.keys()
         var cfg = self.discovered_devices[topic]
         if cfg.contains('config') && cfg['config'].find('mac', '') == mac_part
@@ -905,13 +919,18 @@ class Matter_Device
     if self.discovered_devices != nil
       for topic: self.discovered_devices.keys()
         var c = self.discovered_devices[topic].find('config', {})
+        var added = false
+        for conf: self.plugins_config
+          if conf.find('topic') == topic   added = true  break   end
+        end
         ret[topic] = {
           'name': c.find('dn', topic),
           'version': c.find('sw', ''),
           'mac': c.find('mac', ''),
           'hw': c.find('md', ''),
           'relay_cnt': c.find('rl', []),
-          'lt_st': c.find('lt_st', 0)
+          'lt_st': c.find('lt_st', 0),
+          'added': added
         }
       end
     end

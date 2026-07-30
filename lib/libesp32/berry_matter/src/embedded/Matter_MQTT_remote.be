@@ -101,56 +101,74 @@ class Matter_MQTT_remote
   end
 
   #############################################################
+  # discovery_info
+  #
+  # Convert Tasmota discovery fields to the canonical remote info map
+  static def discovery_info(config)
+    var info = {}
+    var value = config.find("dn")
+    if value != nil   info['name'] = value       end
+    value = config.find("sw")
+    if value != nil   info['version'] = value    end
+    value = config.find("mac")
+    if value != nil   info['mac'] = value        end
+    value = config.find("md")
+    if value != nil   info['hardware'] = value   end
+    return info
+  end
+
+  # Update remote metadata from discovery, returning true only on change
+  def set_info_from_discovery(config)
+    var info = self.discovery_info(config)
+    if size(self.info) == size(info)
+      var same = true
+      for key: info.keys()
+        if self.info.find(key) != info[key]   same = false  break   end
+      end
+      if same   return false   end
+    end
+    self.info = info
+    return true
+  end
+
+  #############################################################
   # generate_config_from_discovery
   #
-  # Auto-generate endpoint configuration from discovery config
+  # Auto-generate endpoint configuration from discovery config and sensors
   # Similar to Matter_UI.generate_config_from_status() but uses discovery data
-  def generate_config_from_discovery(config)
+  static def generate_config_from_discovery(device, config, sensors)
     var config_list = []
 
-    # extract relay count from rl array
+    # rl entries are: 0=unused, 1=relay, 2=light, 3=shutter
     var rl = config.find("rl")
-    var power_cnt = 0
     if rl != nil && size(rl) > 0
-      # count non-zero elements in rl array (first element is relay 1)
+      var lt_st = config.find("lt_st", 0)
+      var so = config.find("so", {})
+      var pwm_multi = bool(so.find("68", 0))
       for i: 0 .. size(rl) - 1
-        if rl[i] != 0
-          power_cnt = i + 1
+        var relay_type = rl[i]
+        if relay_type == 1
+          config_list.push({'type': 'light0', 'relay': i + 1})
+        elif relay_type == 2
+          var light_type = 'light0'
+          if pwm_multi || lt_st == 1
+            light_type = 'light1'
+          elif lt_st == 2
+            light_type = 'light2'
+          elif lt_st >= 3
+            # RGB, RGBW and RGBCW all expose the Matter extended-color features
+            light_type = 'light3'
+          end
+          config_list.push({'type': light_type, 'relay': i + 1})
+        elif relay_type == 3
+          # No remote shutter bridge plug-in exists; never expose its relays as switches.
+          log(f"MTR: MQTT discovery skipping unsupported shutter relay {i + 1}", 3)
         end
       end
     end
 
-    # extract light type from lt_st
-    # 0=none (relay only), 1=dimmer, 2=CT, 3=RGB
-    var lt_st = config.find("lt_st", 0)
-
-    # detect lights based on light type
-    var light1, light2, light3
-    if lt_st == 3 && power_cnt > 0
-      light3 = power_cnt
-      power_cnt -= 1
-    elif lt_st == 2 && power_cnt > 0
-      light2 = power_cnt
-      power_cnt -= 1
-    elif lt_st == 1 && power_cnt > 0
-      light1 = power_cnt
-      power_cnt -= 1
-    end
-
-    # remaining are relays
-    for i: 1 .. power_cnt
-      config_list.push({'type': 'light0', 'relay': i})
-    end
-
-    # add lights
-    if light1 != nil
-      config_list.push({'type': 'light1', 'relay': light1})
-    end
-    if light2 != nil
-      config_list.push({'type': 'light2', 'relay': light2})
-    end
-    if light3 != nil
-      config_list.push({'type': 'light3', 'relay': light3})
+    if sensors != nil
+      config_list += device.autoconf.autoconf_sensors_list(sensors.find("sn", {}))
     end
 
     return config_list
@@ -249,8 +267,9 @@ class Matter_MQTT_remote
       # merge into cached state
       self.merge_state(j)
 
-      # dispatch to any registered callbacks
-      self.dispatch_cb(11, j)
+      # RESULT is often partial; dispatch the merged snapshot so unrelated
+      # endpoints retain their last known fields.
+      self.dispatch_cb(11, self.cached_state)
 
       log(f"MTR: MQTT RESULT received from {self.topic}: {data}", 3)
     end
