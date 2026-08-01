@@ -5,6 +5,8 @@ All notable changes to this project will be documented in this file.
 
 ## [15.5.0.2]
 ### Added
+- Support for baudrate 74880 replacing 74700 (#24924)
+- Support for WiZ compatible IoTorero ESP-Now Remote Control additional buttons P5 to P7
 
 ### Breaking Changed
 
@@ -12,6 +14,10 @@ All notable changes to this project will be documented in this file.
 - Library `PubSubClient` renamed to `TasmotaPubSub`, hardening fixes and comprehensive non-regression tests (#24916)
 
 ### Fixed
+- Can sniffer functionality (#18287)
+- Reset BLE scan flag on new operation (#24925)
+- Minor fixes in `LList` (#24927)
+- TLS fix public key fingerprint for ECDSA certificates (#24928)
 
 ### Removed
 
