@@ -78,6 +78,7 @@ class Matter_UI
   "for(var t in dn){"
   "if(t==='-virtual'){h+='<option disabled>--- Virtual ---</option>';continue;}"
   "if(t==='-zigbee'){h+='<option disabled>--- Zigbee ---</option>';continue;}"
+  "if(t.indexOf('mqtt_')===0&&typeof remtopic==='undefined')continue;"
   "h+='<option value=\"'+t+'\"'+(t===sel?' selected':'')+'>'+dn[t]+'</option>';}"
   "return h;};"
   # Generate parameter rows as table rows (indented under the header row)
@@ -367,6 +368,7 @@ class Matter_UI
   def handle_config_json()
     import webserver
     import json
+    import string
     
     var config_json_str = webserver.arg("config_json")
     if config_json_str == nil || config_json_str == ""
@@ -387,6 +389,12 @@ class Matter_UI
       end
       if self.device.plugins_classes.find(typ) == nil
         raise "value_error", "Unknown type '" + typ + "' for endpoint " + ep_str
+      end
+      if string.find(typ, "mqtt_") == 0 && !conf.find("topic")
+        raise "value_error", "MQTT endpoint " + ep_str + " missing topic"
+      end
+      if string.find(typ, "http_") == 0 && !conf.find("url")
+        raise "value_error", "HTTP endpoint " + ep_str + " missing url"
       end
     end
     
@@ -811,7 +819,7 @@ class Matter_UI
 
     # Emit JavaScript data and functions first (before the HTML that uses them)
     if self.device.zigbee
-      self.show_plugins_hints_js(self._CLASSES_TYPES_STD, self.device.zigbee._CLASSES_TYPES, self._CLASSES_TYPES_VIRTUAL)
+      self.show_plugins_hints_js(self._CLASSES_TYPES_STD, self.device.zigbee._CLASSES_TYPES, self._CLASSES_TYPES_VIRTUAL, self._CLASSES_TYPES3)
     else
       self.show_plugins_hints_js(self._CLASSES_TYPES_STD, self._CLASSES_TYPES_VIRTUAL, self._CLASSES_TYPES3)
     end
@@ -977,9 +985,9 @@ class Matter_UI
     webserver.content_send("var k=Object.keys(d);")
     webserver.content_send("if(!k.length){el.innerHTML='<i>No devices discovered yet. Reboot a Tasmota device on this broker.</i>';return;}")
     webserver.content_send("el.textContent='';var tb=document.createElement('table');tb.style.width='100%';")
-    webserver.content_send("var hr=tb.insertRow();['Device','Version','Topic',''].forEach(function(v){var c=hr.insertCell();c.style.fontSize='smaller';var b=document.createElement('b');b.textContent=v;c.appendChild(b);});")
+    webserver.content_send("var hr=tb.insertRow();['IP','MAC','Topic',''].forEach(function(v){var c=hr.insertCell();c.style.fontSize='smaller';c.style.paddingRight='10px';var b=document.createElement('b');b.textContent=v;c.appendChild(b);});")
     webserver.content_send("for(var i=0;i<k.length;i++){")
-    webserver.content_send("var t=k[i],n=d[t],r=tb.insertRow();[n.name,n.version,t].forEach(function(v){var c=r.insertCell();c.textContent=v==null?'':v;});var a=r.insertCell();")
+    webserver.content_send("var t=k[i],n=d[t],r=tb.insertRow();[n.ip,n.mac,t].forEach(function(v){var c=r.insertCell();c.style.paddingRight='10px';c.textContent=v==null?'':v;});var a=r.insertCell();")
     webserver.content_send("if(n.added)a.textContent='✓ added';")
     webserver.content_send("else{var l=document.createElement('a');l.className='button bgrn';l.href='/matteradd?topic='+encodeURIComponent(t);l.textContent='Add';a.appendChild(l);}}")
     webserver.content_send("el.appendChild(tb);}")

@@ -243,6 +243,7 @@ class Matter_Plugin_Light0 : Matter_Plugin_Device
 
     # ====================================================================================================
     if   cluster == 0x0006              # ========== On/Off 1.5 p.48 ==========
+      if !self.mqtt_command_ready(ctx)   return nil   end
       self.update_shadow_lazy()
       if   command == 0x0000            # ---------- Off ----------
         self.set_onoff(false)

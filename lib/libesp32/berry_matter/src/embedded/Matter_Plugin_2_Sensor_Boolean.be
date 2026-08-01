@@ -171,9 +171,9 @@ class Matter_Plugin_Sensor_Boolean : Matter_Plugin_Device
   # This call is synnchronous and blocking.
   def parse_status(data, index)
     if index == 10                             # Status 10
-      var state = false
-
-      state = (data.find("Switch" + str(self.tasmota_switch_index)) == "ON")
+      var switch_key = "Switch" + str(self.tasmota_switch_index)
+      if !data.contains(switch_key)   return   end
+      var state = (data.find(switch_key) == "ON")
 
       if self.shadow_bool_value != nil && self.shadow_bool_value != bool(state)
         self.value_updated()

@@ -411,6 +411,15 @@ class Matter_Plugin_Device : Matter_Plugin
   #############################################################
   # For Bridge devices
   #############################################################
+  # Return false and set a Matter failure when an MQTT command cannot be sent.
+  def mqtt_command_ready(ctx)
+    if self.mqtt_remote && !self.mqtt_remote.can_send()
+      ctx.status = 0x01 #-matter.FAILURE-#
+      return false
+    end
+    return true
+  end
+
   #############################################################
   # register_cmd_cb
   #

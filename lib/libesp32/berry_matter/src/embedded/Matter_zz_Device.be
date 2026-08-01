@@ -96,6 +96,8 @@ class Matter_Device
     tasmota.when_network_up(def () self.start() end)    # start when network is connected
     self.commissioning.init_basic_commissioning()
     tasmota.add_driver(self)
+    tasmota.add_rule("Mqtt#Connected", / -> self.mqtt_connected())
+    tasmota.add_rule("Mqtt#Disconnected", / -> self.mqtt_disconnected())
 
     self.register_commands()
   end
@@ -838,13 +840,40 @@ class Matter_Device
     if self.mqtt_remotes.contains(topic)
       mqtt_remote = self.mqtt_remotes[topic]
     else
-      mqtt_remote = matter.MQTT_remote(self, topic)
-      if self.plugins_config_remotes.contains(topic)
-        mqtt_remote.set_info(self.plugins_config_remotes[topic])
-      end
+      var info = self.plugins_config_remotes.find(topic, {})
+      mqtt_remote = matter.MQTT_remote(self, topic, info)
       self.mqtt_remotes[topic] = mqtt_remote
     end
     return mqtt_remote
+  end
+
+  # Broker lifecycle is separate from listener replay, which mqtt.be handles.
+  def mqtt_connected()
+    if self.mqtt_remotes
+      for remote: self.mqtt_remotes
+        remote.mqtt_connected()
+      end
+    end
+    return false
+  end
+
+  def mqtt_disconnected()
+    if self.mqtt_remotes
+      for remote: self.mqtt_remotes
+        remote.mqtt_disconnected()
+      end
+    end
+    return false
+  end
+
+  # Notify all endpoints sharing a remote when BridgedDeviceBasic Reachable changes.
+  def mqtt_reachable_changed(remote)
+    import introspect
+    for plugin: self.plugins
+      if introspect.get(plugin, "mqtt_remote") == remote
+        plugin.attribute_updated(0x0039, 0x0011)
+      end
+    end
   end
 
   #####################################################################
@@ -925,6 +954,7 @@ class Matter_Device
         end
         ret[topic] = {
           'name': c.find('dn', topic),
+          'ip': c.find('ip', ''),
           'version': c.find('sw', ''),
           'mac': c.find('mac', ''),
           'hw': c.find('md', ''),
