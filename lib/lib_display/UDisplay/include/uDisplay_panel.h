@@ -13,6 +13,9 @@
 
 #include <Arduino.h>
 
+// Callback invoked (e.g. from an ISR) when the panel finished copying a flushed draw buffer
+typedef void (*FlushDoneCB)(void *user_ctx);
+
 class UniversalPanel {
 public:
     virtual ~UniversalPanel() {}
@@ -32,6 +35,9 @@ public:
     
     // Frame update method for displays that need explicit updates
     virtual bool updateFrame() = 0;
+    // Register a callback fired when the panel finished copying a flushed draw buffer (async flush).
+    // Default no-op: only backends supporting async flush override this.
+    virtual void setFlushDoneCB(FlushDoneCB cb, void *user_ctx) {}
     // Framebuffer - own or external
     uint16_t* framebuffer = nullptr;
 };

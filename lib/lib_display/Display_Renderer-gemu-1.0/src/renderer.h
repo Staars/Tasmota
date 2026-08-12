@@ -37,7 +37,7 @@ typedef struct LVGL_PARAMS {
       uint8_t async_dma : 1;   // force DMA completion before returning, avoid conflict with other devices on same bus. If set you should make sure the display is the only device on the bus
       uint8_t busy_invert : 1;
       uint8_t invert_bw : 1;
-      uint8_t resvd_3 : 1;
+      uint8_t async_flush : 1; // defer lv_disp_flush_ready until the panel finished copying the draw buffer (async flush, e.g. P4 DSI DMA2D)
       uint8_t resvd_4 : 1;
       uint8_t resvd_5 : 1;
     };
@@ -46,6 +46,8 @@ typedef struct LVGL_PARAMS {
 
 typedef void (*pwr_cb)(uint8_t);
 typedef void (*dim_cb)(uint8_t);
+// Callback invoked (e.g. from an ISR) when the panel finished copying the LVGL draw buffer
+typedef void (*FlushDoneCB)(void *user_ctx);
 
 #define USE_GFX
 
@@ -89,6 +91,9 @@ public:
   virtual void Sleep(void);
   virtual char *devname(void);
   virtual LVGL_PARAMS *lvgl_pars(void);
+  // Register a callback fired when the panel finished copying a flushed draw buffer (async flush).
+  // Default no-op: only display backends that support async flush override this.
+  virtual void setFlushDoneCB(FlushDoneCB cb, void *user_ctx) {}
   virtual void ep_update_mode(uint8_t mode);
   virtual void ep_update_area(uint16_t xp, uint16_t yp, uint16_t width, uint16_t height, uint8_t mode);
   virtual uint32_t get_sr_touch(uint32_t xp, uint32_t xm, uint32_t yp, uint32_t ym);

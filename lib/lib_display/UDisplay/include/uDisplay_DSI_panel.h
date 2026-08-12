@@ -76,6 +76,10 @@ public:
     bool setRotation(uint8_t rotation) override;
     bool updateFrame() override;
     
+    // Register a callback fired from the DMA2D completion ISR once the LVGL draw buffer
+    // has been copied into the DPI frame buffer and is safe to overwrite (async flush)
+    void setFlushDoneCB(FlushDoneCB cb, void *user_ctx) override;
+    
     // Get direct framebuffer access (for DPI mode)
     uint16_t* framebuffer = nullptr;
 
@@ -86,6 +90,11 @@ private:
     esp_ldo_channel_handle_t ldo_handle = nullptr;
     DSIPanelConfig cfg;
     void sendInitCommandsDBI();
+    
+    // Async flush: callback fired from the DMA2D completion ISR
+    FlushDoneCB flush_done_cb = nullptr;
+    void *flush_done_user_ctx = nullptr;
+    static bool IRAM_ATTR colorTransDoneCb(esp_lcd_panel_handle_t panel, esp_lcd_dpi_panel_event_data_t *edata, void *user_ctx);
     
     // Display parameters
     uint8_t rotation = 0;

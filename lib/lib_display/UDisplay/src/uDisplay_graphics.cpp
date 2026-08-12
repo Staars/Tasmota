@@ -114,6 +114,12 @@ void uDisplay::setAddrWindow(uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1)
     }
 }
 
+void uDisplay::setFlushDoneCB(FlushDoneCB cb, void *user_ctx) {
+    if (universal_panel) {
+        universal_panel->setFlushDoneCB(cb, user_ctx);
+    }
+}
+
 void uDisplay::setRotation(uint8_t rotation) {
     cur_rot = rotation;
     if (universal_panel->setRotation(rotation)) {

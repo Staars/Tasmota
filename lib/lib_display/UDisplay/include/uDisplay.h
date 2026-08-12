@@ -122,6 +122,8 @@ class uDisplay : public Renderer {
   void pushColors(uint16_t *data, uint32_t len, boolean first);
   void TS_RotConvert(int16_t *x, int16_t *y);
   void invertDisplay(boolean i);
+  // Register a callback fired when the panel finished copying a flushed draw buffer (async flush)
+  void setFlushDoneCB(FlushDoneCB cb, void *user_ctx) override;
   void SetPwrCB(pwr_cb cb) { pwr_cbp = cb; };
   void SetDimCB(dim_cb cb) { dim_cbp = cb; };
 #ifdef USE_UNIVERSAL_TOUCH

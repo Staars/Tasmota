@@ -95,6 +95,17 @@ DSIPanel::DSIPanel(const DSIPanelConfig& config)
     }
     AddLog(3, "DSI: DPI panel created");
 
+    // Register the draw-done callback: fired from the DMA2D completion ISR when the
+    // LVGL draw buffer has been copied into the frame buffer (enables async flush)
+    esp_lcd_dpi_panel_event_callbacks_t dpi_cbs = {
+        .on_color_trans_done = &DSIPanel::colorTransDoneCb,
+    };
+    ret = esp_lcd_dpi_panel_register_event_callbacks(panel_handle, &dpi_cbs, this);
+    if (ret != ESP_OK) {
+        AddLog(3, "DSI: Failed to register draw-done callback: %d", ret);
+        return;
+    }
+
     // Step 6: Reset via GPIO (from config)
     if (cfg.reset_pin >= 0) {
         gpio_config_t gpio_conf = {
@@ -283,6 +294,21 @@ bool DSIPanel::updateFrame() {
     framebuffer_dirty = false;  // ← RESET
 
     return true;
+}
+
+void DSIPanel::setFlushDoneCB(FlushDoneCB cb, void *user_ctx) {
+    flush_done_cb = cb;
+    flush_done_user_ctx = user_ctx;
+}
+
+// Runs in the DMA2D completion ISR context (IRAM_ATTR), right after the ESP-IDF driver
+// released its draw semaphore - at this point the flushed LVGL buffer is safe to overwrite
+bool IRAM_ATTR DSIPanel::colorTransDoneCb(esp_lcd_panel_handle_t panel, esp_lcd_dpi_panel_event_data_t *edata, void *user_ctx) {
+    DSIPanel *self = static_cast<DSIPanel*>(user_ctx);
+    if (self->flush_done_cb) {
+        self->flush_done_cb(self->flush_done_user_ctx);
+    }
+    return false; // no task woken up
 }
 
 #endif // SOC_MIPI_DSI_SUPPORTED
