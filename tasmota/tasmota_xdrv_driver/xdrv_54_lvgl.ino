@@ -67,6 +67,15 @@ static void lvbe_debug(lv_log_level_t, const char *msg) {
 /************************************************************
  * Main screen refresh function
  ************************************************************/
+// Called from the panel's DMA2D completion ISR once the flushed draw buffer has been
+// copied into the frame buffer and is safe to overwrite (async flush on DSI panels)
+static void lvgl_async_flush_done(void *user_ctx) {
+  LVGL_Glue *glue = static_cast<LVGL_Glue*>(user_ctx);
+  if (glue && glue->lv_display) {
+    lv_display_flush_ready(glue->lv_display);
+  }
+}
+
 // This is the flush function required for LittlevGL screen updates.
 // It receives a bounding rect and an array of pixel data (conveniently
 // already in 565 format, so the Earth was lucky there).
@@ -97,12 +106,21 @@ void lv_flush_callback(lv_display_t *disp, const lv_area_t *area, uint8_t *color
   uint32_t pixels_len = width * height;
   uint32_t chrono_start = millis();
   renderer->setAddrWindow(area->x1, area->y1, area->x1+width, area->y1+height);
-  renderer->pushColors((uint16_t *)color_p, pixels_len, true);
+  bool ok = renderer->pushColors((uint16_t *)color_p, pixels_len, true);
   renderer->setAddrWindow(0,0,0,0);
   renderer->Updateframe();
   uint32_t chrono_time = millis() - chrono_start;
 
-  lv_disp_flush_ready(disp);
+  bool async_flush = renderer->lvgl_pars()->async_flush;
+  if (!async_flush || !ok) {
+    // Synchronous flush (all non-DSI displays), or the flush failed: we MUST
+    // signal LVGL in-place, otherwise it would wait for a completion forever
+    lv_disp_flush_ready(disp);
+  }
+  // DSI async flush: lv_display_flush_ready() is deferred to lvgl_async_flush_done(),
+  // fired by the panel's DMA2D completion ISR once the draw buffer is safely copied
+  // out. LVGL will not touch the buffer again until then, which eliminates the
+  // draw_bitmap "previous draw operation is not finished" race by construction.
 
   if (pixels_len >= 10000 && (!renderer->lvgl_param.use_dma)) {
     if (HighestLogLevel() >= LOG_LEVEL_DEBUG_MORE) {
@@ -523,6 +541,11 @@ void start_lvgl(const char * uconfig) {
   lv_display_set_dpi(lvgl_glue->lv_display, 160);          // set display to 160 DPI instead of default 130 DPI to avoid some rounding in styles
   lv_display_set_flush_cb(lvgl_glue->lv_display, lv_flush_callback);
   lv_display_set_buffers(lvgl_glue->lv_display, lvgl_glue->lv_pixel_buf, lvgl_glue->lv_pixel_buf2, lvgl_buffer_size * (LV_COLOR_DEPTH / 8), LV_DISPLAY_RENDER_MODE_PARTIAL);
+
+  // Async flush: the display panel signals when the flushed draw buffer is copied out
+  if (renderer->lvgl_pars()->async_flush) {
+    renderer->setFlushDoneCB(lvgl_async_flush_done, lvgl_glue);
+  }
 
   // Initialize LvGL input device (touchscreen already started)
   lvgl_glue->lv_indev = lv_indev_create();
