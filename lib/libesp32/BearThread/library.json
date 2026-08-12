@@ -1,7 +1,7 @@
 {
     "name": "BearThread",
     "version": "1.0",
-    "description": "Self-contained OpenThread MTD library for Matter over Thread, using BearSSL crypto",
+    "description": "Tasmota BearSSL crypto and LittleFS settings glue for ESP-IDF OpenThread",
     "license": "BSD-3-Clause",
     "homepage": "https://github.com/arendst/Tasmota",
     "frameworks": "arduino",
@@ -15,43 +15,12 @@
       "flags": [
         "-I$PROJECT_DIR/include",
         "-includetasmota_options.h",
-        "-I$PROJECT_DIR/lib/libesp32/BearThread/include",
-        "-I$PROJECT_DIR/lib/libesp32/BearThread/openthread/include",
-        "-I$PROJECT_DIR/lib/libesp32/BearThread/openthread/src/core",
-        "-I$PROJECT_DIR/lib/libesp32/BearThread/openthread/src",
-        "-I$PROJECT_DIR/lib/libesp32/BearThread/openthread/src/include",
-        "-I$PROJECT_DIR/lib/libesp32/BearThread/openthread/src/lib/hdlc",
-        "-I$PROJECT_DIR/lib/libesp32/BearThread/openthread/src/lib/spinel",
-        "-I$PROJECT_DIR/lib/libesp32/BearThread/openthread/examples/platforms",
-        "-DPACKAGE_VERSION=\\\"BearThread-1.0\\\"",
-        "-DOPENTHREAD_FTD=1",
-        "-DOPENTHREAD_MTD=0",
-        "-DOPENTHREAD_RADIO=0",
-        "-DOPENTHREAD_PROJECT_CORE_CONFIG_FILE=\\\"bearthread-core-config.h\\\"",
-        "-DOPENTHREAD_CONFIG_FILE=\\\"bearthread-core-config.h\\\""
+        "-I$PROJECT_DIR/lib/libesp32/BearThread/include"
       ],
       "srcFilter": [
-        "+<*.c>",
-        "+<*.cpp>",
-        "+<../openthread/src/core/api/>",
-        "+<../openthread/src/core/common/>",
-        "+<../openthread/src/core/crypto/>",
-        "+<../openthread/src/core/diags/>",
-        "+<../openthread/src/core/instance/>",
-        "+<../openthread/src/core/mac/>",
-        "+<../openthread/src/core/radio/>",
-        "+<../openthread/src/core/thread/>",
-        "+<../openthread/src/core/utils/>",
-        "+<../openthread/src/core/backbone_router/>",
-        "+<../openthread/src/core/coap/>",
-        "+<../openthread/src/core/meshcop/>",
-        "+<../openthread/src/core/net/>",
-        "+<../openthread/src/lib/platform/>",
-        "+<../openthread/src/lib/hdlc/>",
-        "+<../openthread/src/lib/spinel/>",
-        "+<../openthread/examples/platforms/utils/mac_frame.cpp>",
-        "+<../openthread/examples/platforms/utils/link_metrics.cpp>",
-        "-<../openthread/src/core/instance/extension_example.cpp>"
+        "-<*>",
+        "+<bt_crypto_bearssl.cpp>",
+        "+<bt_misc.cpp>"
       ]
     }
 }

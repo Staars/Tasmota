@@ -1,19 +1,12 @@
 /*
  * bearthread-core-config.h - OpenThread core configuration for BearThread
  *
- * Self-contained config for MTD (Minimal Thread Device) with BearSSL crypto.
- * Replaces both openthread-core-esp32x-mtd-config.h and openthread-core-bearssl-config.h
+ * Custom settings shared by ESP-IDF's generated FTD and MTD configurations.
+ * The device role is selected by sdkconfig and must not be defined here.
  */
 
 #ifndef BEARTHREAD_CORE_CONFIG_H_
 #define BEARTHREAD_CORE_CONFIG_H_
-
-/* ---- Device type: FTD (Full Thread Device, can become router) ---- */
-#define OPENTHREAD_FTD 1
-
-/* ---- Platform info ---- */
-#define OPENTHREAD_CONFIG_PLATFORM_INFO "BearThread-ESP32"
-#define PACKAGE_NAME "BearThread"
 
 /* ---- BearSSL crypto backend (CRYPTO_LIB_PLATFORM) ---- */
 /* Uses bt_crypto_bearssl.cpp to provide otPlatCrypto*() callbacks via BearSSL.
@@ -26,20 +19,13 @@
 #define OPENTHREAD_CONFIG_HKDF_CONTEXT_SIZE                  512
 #define OPENTHREAD_CONFIG_ENABLE_BUILTIN_MBEDTLS               0
 #define OPENTHREAD_CONFIG_ENABLE_BUILTIN_MBEDTLS_MANAGEMENT    0
+#define OPENTHREAD_CONFIG_PLATFORM_KEY_REFERENCES_ENABLE       0
 
 /* ---- Disable features we don't need ---- */
-#define OPENTHREAD_CONFIG_COMMISSIONER_ENABLE                  0
-#define OPENTHREAD_CONFIG_JOINER_ENABLE                        0
-#define OPENTHREAD_CONFIG_DIAG_ENABLE                          0
 #define OPENTHREAD_CONFIG_BORDER_ROUTER_ENABLE                 0
 #define OPENTHREAD_CONFIG_BORDER_ROUTING_ENABLE                0
-#define OPENTHREAD_CONFIG_BORDER_AGENT_ENABLE                  0
 #define OPENTHREAD_CONFIG_BACKBONE_ROUTER_ENABLE               0
 #define OPENTHREAD_CONFIG_TCP_ENABLE                           0
-#define OPENTHREAD_CONFIG_TIME_SYNC_ENABLE                     0
-#define OPENTHREAD_CONFIG_RADIO_STATS_ENABLE                   0
-#define OPENTHREAD_CONFIG_MAC_CSL_RECEIVER_ENABLE              0
-#define OPENTHREAD_CONFIG_MAC_FILTER_ENABLE                    0
 #define OPENTHREAD_CONFIG_PING_SENDER_ENABLE                   0
 #define OPENTHREAD_CONFIG_REFERENCE_DEVICE_ENABLE              0
 #define OPENTHREAD_CONFIG_NCP_HDLC_ENABLE                      0
@@ -67,7 +53,6 @@
 #define OPENTHREAD_CONFIG_DATASET_UPDATER_ENABLE               0
 #define OPENTHREAD_CONFIG_BLE_TCAT_ENABLE                      0
 #define OPENTHREAD_CONFIG_MULTI_RADIO_ENABLE                   0
-#define OPENTHREAD_CONFIG_RADIO_LINK_TREL_ENABLE               0
 
 /* ---- Enable features we need ---- */
 /* SRP client is compiled into BearThread and driven via native OT API calls
@@ -78,12 +63,9 @@
  * ECDSA is used by the OT SRP client for SIG(0) signing — BearSSL implementation
  * in bt_crypto_bearssl.cpp provides otPlatCryptoEcdsa*. */
 #define OPENTHREAD_CONFIG_THREAD_VERSION                       OT_THREAD_VERSION_1_4
-#define OPENTHREAD_CONFIG_SRP_CLIENT_ENABLE                    1
 #define OPENTHREAD_CONFIG_SRP_CLIENT_AUTO_START_API_ENABLE     1
 #define OPENTHREAD_CONFIG_SRP_CLIENT_AUTO_START_DEFAULT_MODE   1
-#define OPENTHREAD_CONFIG_SRP_CLIENT_BUFFERS_MAX_SERVICES      5
 #define OPENTHREAD_CONFIG_ECDSA_ENABLE                         1
-#define OPENTHREAD_CONFIG_DNS_CLIENT_ENABLE                    0
 #define OPENTHREAD_CONFIG_COAP_API_ENABLE                      0
 #define OPENTHREAD_CONFIG_IP6_SLAAC_ENABLE                     1
 #define OPENTHREAD_CONFIG_TMF_NETDATA_SERVICE_ENABLE           1
@@ -98,22 +80,12 @@
 
 /* ---- Logging ---- */
 #define OPENTHREAD_CONFIG_LOG_OUTPUT OPENTHREAD_CONFIG_LOG_OUTPUT_PLATFORM_DEFINED
-#define OPENTHREAD_CONFIG_LOG_LEVEL                            OT_LOG_LEVEL_WARN
-#define OPENTHREAD_CONFIG_LOG_LEVEL_DYNAMIC_ENABLE             1
 
 /* ---- Resource sizing ---- */
-#define OPENTHREAD_CONFIG_NUM_MESSAGE_BUFFERS                  96
 #define OPENTHREAD_CONFIG_6LOWPAN_REASSEMBLY_TIMEOUT          10
-#define OPENTHREAD_CONFIG_MAC_MAX_CSMA_BACKOFFS_DIRECT         4
-#define OPENTHREAD_CONFIG_TMF_ADDRESS_QUERY_TIMEOUT           3
-#define OPENTHREAD_CONFIG_TMF_ADDRESS_QUERY_INITIAL_RETRY_DELAY 15
-#define OPENTHREAD_CONFIG_TMF_ADDRESS_QUERY_MAX_RETRY_DELAY   120
 
 /* ---- Parent search ---- */
 #define OPENTHREAD_CONFIG_PARENT_SEARCH_ENABLE                 1
-#define OPENTHREAD_CONFIG_PARENT_SEARCH_CHECK_INTERVAL       600  /* 10 minutes */
-#define OPENTHREAD_CONFIG_PARENT_SEARCH_BACKOFF_INTERVAL      36000 /* 10 hours */
-#define OPENTHREAD_CONFIG_PARENT_SEARCH_RSS_THRESHOLD        -65
 
 /* ---- Delay-aware queue ---- */
 #define OPENTHREAD_CONFIG_DELAY_AWARE_QUEUE_MANAGEMENT_MARK_ECN_INTERVAL 1000

@@ -22,8 +22,10 @@
 
 #include <berry.h>
 
-// 1. BearThread platform API (replaces ESP-IDF OpenThread wrappers)
-#include "bt_platform.h"
+// 1. ESP-IDF OpenThread platform API
+#include "esp_openthread.h"
+#include "esp_openthread_lock.h"
+#include "esp_openthread_types.h"
 
 // 2. OpenThread Native Includes (via BearThread's vendored headers)
 #include <openthread/instance.h>
@@ -93,12 +95,12 @@ static void srp_server_state_change(const otSockAddr *aServerSockAddr, void *aCo
 // Caller must call ot_unlock() after use.
 static void* ot_lock_and_get(void) {
   if (!OT_State.initialized) return nullptr;
-  bt_lock_acquire(portMAX_DELAY);
-  return (void*)bt_get_instance();
+  esp_openthread_lock_acquire(portMAX_DELAY);
+  return (void*)esp_openthread_get_instance();
 }
 
 static void ot_unlock(void) {
-  bt_lock_release();
+  esp_openthread_lock_release();
 }
 
 // ---- OT.init() ----
@@ -118,15 +120,21 @@ extern "C" int be_OT_init(bvm *vm) {
   };
   ESP_ERROR_CHECK(esp_vfs_eventfd_register(&eventfd_config));
 
-  // Initialize BearThread platform (lock, radio, OT instance)
-  esp_err_t err = bt_platform_init();
+  // Initialize the IDF OpenThread platform, native C6 radio and OT instance.
+  esp_openthread_platform_config_t config = {};
+  config.radio_config.radio_mode = RADIO_MODE_NATIVE;
+  config.host_config.host_connection_mode = HOST_CONNECTION_MODE_NONE;
+  config.port_config.storage_partition_name = nullptr;  // LittleFS settings are external
+  config.port_config.netif_queue_size = 10;
+  config.port_config.task_queue_size = 10;
+  esp_err_t err = esp_openthread_init(&config);
   if (err != ESP_OK) {
-    be_raisef(vm, "ot_error", "OT: bt_platform_init failed: %d", err);
+    be_raisef(vm, "ot_error", "OT: esp_openthread_init failed: %d", err);
     be_return_nil(vm);
   }
 
   // Register state change callback
-  otInstance *instance = bt_get_instance();
+  otInstance *instance = esp_openthread_get_instance();
   otSetStateChangedCallback(instance, (otStateChangedCallback)ot_state_changed_callback, nullptr);
 
   // Set up native OT SRP client with auto-start (matches esp-matter flow).
@@ -139,14 +147,14 @@ extern "C" int be_OT_init(bvm *vm) {
   xTaskCreate(ot_task, "ot_main", 6144, nullptr, 5, &OT_State.task_handle);
 
   OT_State.initialized = true;
-  AddLog(LOG_LEVEL_INFO, PSTR("OT : OpenThread initialized (BearThread)"));
+  AddLog(LOG_LEVEL_INFO, PSTR("OT : OpenThread initialized (ESP-IDF + BearSSL)"));
 
   be_return(vm);
 }
 
 // ---- OpenThread main loop task ----
 static void ot_task(void *pvParameters) {
-  bt_launch_mainloop();
+  esp_openthread_launch_mainloop();
   // Should not return
   vTaskDelete(nullptr);
 }
@@ -161,7 +169,7 @@ static void ot_task(void *pvParameters) {
 static void ot_state_changed_callback(uint32_t aFlags, void *aContext) {
   if (aFlags & (OT_CHANGED_THREAD_ROLE | OT_CHANGED_THREAD_NETDATA |
                 OT_CHANGED_IP6_ADDRESS_ADDED | OT_CHANGED_IP6_ADDRESS_REMOVED)) {
-    otInstance *instance = bt_get_instance();
+    otInstance *instance = esp_openthread_get_instance();
     otDeviceRole role = otThreadGetDeviceRole(instance);
     const char *role_str;
     switch (role) {
@@ -260,11 +268,11 @@ extern "C" const char* be_OT_get_eui64(void) {
 
   if (!OT_State.initialized) return "";
 
-  bt_lock_acquire(portMAX_DELAY);
-  otInstance *instance = bt_get_instance();
+  esp_openthread_lock_acquire(portMAX_DELAY);
+  otInstance *instance = esp_openthread_get_instance();
   otExtAddress eui64;
   otLinkGetFactoryAssignedIeeeEui64(instance, &eui64);
-  bt_lock_release();
+  esp_openthread_lock_release();
 
   snprintf(eui64_str, sizeof(eui64_str), "%02X%02X%02X%02X%02X%02X%02X%02X",
            eui64.m8[0], eui64.m8[1], eui64.m8[2], eui64.m8[3],
@@ -282,8 +290,8 @@ extern "C" int be_OT_get_ipaddr(bvm *vm) {
 
   be_newobject(vm, "list");
 
-  bt_lock_acquire(portMAX_DELAY);
-  otInstance *instance = bt_get_instance();
+  esp_openthread_lock_acquire(portMAX_DELAY);
+  otInstance *instance = esp_openthread_get_instance();
   const otNetifAddress *addr = otIp6GetUnicastAddresses(instance);
   char addr_str[OT_IP6_ADDRESS_STRING_SIZE];
 
@@ -294,7 +302,7 @@ extern "C" int be_OT_get_ipaddr(bvm *vm) {
     be_pop(vm, 1);
     addr = addr->mNext;
   }
-  bt_lock_release();
+  esp_openthread_lock_release();
 
   be_pop(vm, 1);
   be_return(vm);
@@ -311,8 +319,8 @@ extern "C" int be_OT_netdata_services(bvm *vm) {
     be_pop(vm, 1);
     be_return(vm);
   }
-  bt_lock_acquire(portMAX_DELAY);
-  otInstance *instance = bt_get_instance();
+  esp_openthread_lock_acquire(portMAX_DELAY);
+  otInstance *instance = esp_openthread_get_instance();
   otNetworkDataIterator iter = OT_NETWORK_DATA_ITERATOR_INIT;
   otServiceConfig svc;
   char line[160];
@@ -365,7 +373,7 @@ extern "C" int be_OT_netdata_services(bvm *vm) {
     be_data_push(vm, -2);
     be_pop(vm, 1);
   }
-  bt_lock_release();
+  esp_openthread_lock_release();
   be_pop(vm, 1);  // remove list internal pointer
   be_return(vm);
 }
