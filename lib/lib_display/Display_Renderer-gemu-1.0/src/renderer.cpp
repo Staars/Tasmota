@@ -67,7 +67,15 @@ void Renderer::dim10(uint8_t contrast, uint16_t contrast_gamma) {
 }
 
 void Renderer::pushColors(uint16_t *data, uint32_t len, boolean first) {
+}
 
+PushColorsResult Renderer::pushColorsAsync(uint16_t *data, uint32_t len, boolean first,
+                                           FlushDoneCB done_cb, void *user_ctx) {
+    pushColors(data, len, first);
+    if (done_cb) {
+        done_cb(user_ctx);
+    }
+    return PushColorsResult::Complete;
 }
 
 void Renderer::setAddrWindow(uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1) {
@@ -651,6 +659,10 @@ char *Renderer::devname(void) {
 
 LVGL_PARAMS *Renderer::lvgl_pars(void) {
   return &lvgl_param;
+}
+
+bool Renderer::supportsLvglPsramBuffer(void) const {
+  return false;
 }
 
 void Renderer::ep_update_mode(uint8_t mode) {

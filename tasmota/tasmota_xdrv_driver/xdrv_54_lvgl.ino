@@ -106,21 +106,17 @@ void lv_flush_callback(lv_display_t *disp, const lv_area_t *area, uint8_t *color
   uint32_t pixels_len = width * height;
   uint32_t chrono_start = millis();
   renderer->setAddrWindow(area->x1, area->y1, area->x1+width, area->y1+height);
-  bool ok = renderer->pushColors((uint16_t *)color_p, pixels_len, true);
+  PushColorsResult result = renderer->pushColorsAsync((uint16_t *)color_p, pixels_len, true,
+                                                      lvgl_async_flush_done, lvgl_glue);
   renderer->setAddrWindow(0,0,0,0);
   renderer->Updateframe();
   uint32_t chrono_time = millis() - chrono_start;
 
-  bool async_flush = renderer->lvgl_pars()->async_flush;
-  if (!async_flush || !ok) {
-    // Synchronous flush (all non-DSI displays), or the flush failed: we MUST
-    // signal LVGL in-place, otherwise it would wait for a completion forever
+  if (result == PushColorsResult::NotHandled || result == PushColorsResult::Error) {
+    // A rejected transfer has no completion callback. Always release LVGL's
+    // buffer in this path so a renderer error cannot deadlock the UI.
     lv_disp_flush_ready(disp);
   }
-  // DSI async flush: lv_display_flush_ready() is deferred to lvgl_async_flush_done(),
-  // fired by the panel's DMA2D completion ISR once the draw buffer is safely copied
-  // out. LVGL will not touch the buffer again until then, which eliminates the
-  // draw_bitmap "previous draw operation is not finished" race by construction.
 
   if (pixels_len >= 10000 && (!renderer->lvgl_param.use_dma)) {
     if (HighestLogLevel() >= LOG_LEVEL_DEBUG_MORE) {
@@ -457,7 +453,7 @@ void lvgl_touchscreen_read(lv_indev_t *indev_drv, lv_indev_data_t *data) {
   }
 }
 
-// Actual RAM usage will be 2X these figures, since using 2 DMA buffers...
+// Default row count when the display descriptor does not specify flushlines.
 #define LV_BUFFER_ROWS 60 // Most others have a bit more space
 
 /************************************************************
@@ -491,8 +487,9 @@ void start_lvgl(const char * uconfig) {
   // Initialize lvgl_glue, passing in address of display & touchscreen
   lv_init();
 
-  // Allocate LvGL display buffer (x2 because DMA double buffering)
+  // Allocate one draw buffer, plus a second only when use_dma requests it.
   bool status_ok = true;
+  const bool prefer_psram = renderer->lvgl_param.prefer_psram && renderer->supportsLvglPsramBuffer();
   size_t lvgl_buffer_size;
   do {
     uint32_t flushlines = renderer->lvgl_pars()->flushlines;
@@ -502,9 +499,11 @@ void start_lvgl(const char * uconfig) {
     if (renderer->lvgl_pars()->use_dma) {
       lvgl_buffer_size /= 2;
       if (lvgl_buffer_size < 1000000) {
-        // allocate preferably in internal memory which is faster than PSRAM
-        AddLog(LOG_LEVEL_DEBUG, "LVG: Allocating buffer2 %i bytes in main memory (flushlines %i)", (lvgl_buffer_size * (LV_COLOR_DEPTH / 8)) / 1024, flushlines);
-        lvgl_glue->lv_pixel_buf2 = heap_caps_malloc_prefer(lvgl_buffer_size * (LV_COLOR_DEPTH / 8), 2, MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL, MALLOC_CAP_8BIT);
+        const uint32_t buffer_size = lvgl_buffer_size * (LV_COLOR_DEPTH / 8);
+        AddLog(LOG_LEVEL_DEBUG, "LVG: Allocating buffer2 %i KB, preferring %s (flushlines %i)", buffer_size / 1024, prefer_psram ? "PSRAM" : "main memory", flushlines);
+        lvgl_glue->lv_pixel_buf2 = prefer_psram
+          ? heap_caps_malloc_prefer(buffer_size, 2, MALLOC_CAP_8BIT | MALLOC_CAP_SPIRAM, MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL)
+          : heap_caps_malloc_prefer(buffer_size, 2, MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL, MALLOC_CAP_8BIT);
       }
       if (!lvgl_glue->lv_pixel_buf2) {
         status_ok = false;
@@ -512,9 +511,11 @@ void start_lvgl(const char * uconfig) {
       }
     }
 
-    // allocate preferably in internal memory which is faster than PSRAM
-    AddLog(LOG_LEVEL_DEBUG, "LVG: Allocating buffer1 %i KB in main memory (flushlines %i)", (lvgl_buffer_size * (LV_COLOR_DEPTH / 8)) / 1024, flushlines);
-    lvgl_glue->lv_pixel_buf = heap_caps_malloc_prefer(lvgl_buffer_size * (LV_COLOR_DEPTH / 8), 2, MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL, MALLOC_CAP_8BIT);
+    const uint32_t buffer_size = lvgl_buffer_size * (LV_COLOR_DEPTH / 8);
+    AddLog(LOG_LEVEL_DEBUG, "LVG: Allocating buffer1 %i KB, preferring %s (flushlines %i)", buffer_size / 1024, prefer_psram ? "PSRAM" : "main memory", flushlines);
+    lvgl_glue->lv_pixel_buf = prefer_psram
+      ? heap_caps_malloc_prefer(buffer_size, 2, MALLOC_CAP_8BIT | MALLOC_CAP_SPIRAM, MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL)
+      : heap_caps_malloc_prefer(buffer_size, 2, MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL, MALLOC_CAP_8BIT);
     if (!lvgl_glue->lv_pixel_buf) {
       status_ok = false;
       break;
@@ -541,11 +542,6 @@ void start_lvgl(const char * uconfig) {
   lv_display_set_dpi(lvgl_glue->lv_display, 160);          // set display to 160 DPI instead of default 130 DPI to avoid some rounding in styles
   lv_display_set_flush_cb(lvgl_glue->lv_display, lv_flush_callback);
   lv_display_set_buffers(lvgl_glue->lv_display, lvgl_glue->lv_pixel_buf, lvgl_glue->lv_pixel_buf2, lvgl_buffer_size * (LV_COLOR_DEPTH / 8), LV_DISPLAY_RENDER_MODE_PARTIAL);
-
-  // Async flush: the display panel signals when the flushed draw buffer is copied out
-  if (renderer->lvgl_pars()->async_flush) {
-    renderer->setFlushDoneCB(lvgl_async_flush_done, lvgl_glue);
-  }
 
   // Initialize LvGL input device (touchscreen already started)
   lvgl_glue->lv_indev = lv_indev_create();

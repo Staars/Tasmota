@@ -120,10 +120,11 @@ class uDisplay : public Renderer {
   void fillScreen(uint16_t color);
   void fillRect(int16_t x, int16_t y, int16_t w, int16_t h, uint16_t color);
   void pushColors(uint16_t *data, uint32_t len, boolean first);
+  PushColorsResult pushColorsAsync(uint16_t *data, uint32_t len, boolean first,
+                                   FlushDoneCB done_cb, void *user_ctx) override;
+  bool supportsLvglPsramBuffer(void) const override;
   void TS_RotConvert(int16_t *x, int16_t *y);
   void invertDisplay(boolean i);
-  // Register a callback fired when the panel finished copying a flushed draw buffer (async flush)
-  void setFlushDoneCB(FlushDoneCB cb, void *user_ctx) override;
   void SetPwrCB(pwr_cb cb) { pwr_cbp = cb; };
   void SetDimCB(dim_cb cb) { dim_cbp = cb; };
 #ifdef USE_UNIVERSAL_TOUCH

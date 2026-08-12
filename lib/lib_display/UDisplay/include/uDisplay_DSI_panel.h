@@ -66,6 +66,8 @@ public:
     bool drawPixel(int16_t x, int16_t y, uint16_t color) override;
     bool fillRect(int16_t x, int16_t y, int16_t w, int16_t h, uint16_t color) override;
     bool pushColors(uint16_t *data, uint32_t len, bool not_swapped) override;
+    PushColorsResult pushColorsAsync(uint16_t *data, uint32_t len, bool not_swapped,
+                                     FlushDoneCB done_cb, void *user_ctx) override;
     bool setAddrWindow(int16_t x0, int16_t y0, int16_t x1, int16_t y1) override;
     bool drawFastHLine(int16_t x, int16_t y, int16_t w, uint16_t color) override;
     bool drawFastVLine(int16_t x, int16_t y, int16_t h, uint16_t color) override;
@@ -75,10 +77,6 @@ public:
     bool invertDisplay(bool invert) override;
     bool setRotation(uint8_t rotation) override;
     bool updateFrame() override;
-    
-    // Register a callback fired from the DMA2D completion ISR once the LVGL draw buffer
-    // has been copied into the DPI frame buffer and is safe to overwrite (async flush)
-    void setFlushDoneCB(FlushDoneCB cb, void *user_ctx) override;
     
     // Get direct framebuffer access (for DPI mode)
     uint16_t* framebuffer = nullptr;
@@ -90,12 +88,15 @@ private:
     esp_ldo_channel_handle_t ldo_handle = nullptr;
     DSIPanelConfig cfg;
     void sendInitCommandsDBI();
-    
-    // Async flush: callback fired from the DMA2D completion ISR
+
+    // Async flush: one callback is associated with each accepted transfer.
     FlushDoneCB flush_done_cb = nullptr;
     void *flush_done_user_ctx = nullptr;
+    volatile bool transfer_pending = false;
+    bool completion_callback_registered = false;
+    static void IRAM_ATTR syncDoneCb(void *user_ctx);
     static bool IRAM_ATTR colorTransDoneCb(esp_lcd_panel_handle_t panel, esp_lcd_dpi_panel_event_data_t *edata, void *user_ctx);
-    
+
     // Display parameters
     uint8_t rotation = 0;
 

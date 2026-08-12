@@ -67,14 +67,33 @@ void uDisplay::fillScreen(uint16_t color) {
 
 static inline void lvgl_color_swap(uint16_t *data, uint16_t len) { for (uint32_t i = 0; i < len; i++) (data[i] = data[i] << 8 | data[i] >> 8); }
 
-void uDisplay::pushColors(uint16_t *data, uint32_t len, boolean not_swapped) {  //not_swapped is always true in call form LVGL driver!!!!
+void uDisplay::pushColors(uint16_t *data, uint32_t len, boolean not_swapped) {
+  if (lvgl_param.swap_color) {
+    not_swapped = !not_swapped;
+  }
 
-    if (lvgl_param.swap_color) {
-        not_swapped = !not_swapped;
+  if (!universal_panel->pushColors(data, len, not_swapped)) {
+    pushColorsMono(data, len, not_swapped);
+  }
+}
+
+PushColorsResult uDisplay::pushColorsAsync(uint16_t *data, uint32_t len, boolean not_swapped,
+                                           FlushDoneCB done_cb, void *user_ctx) {
+  if (lvgl_param.swap_color) {
+    not_swapped = !not_swapped;
+  }
+
+  PushColorsResult result = universal_panel->pushColorsAsync(data, len, not_swapped,
+                                                              done_cb, user_ctx);
+  if (result == PushColorsResult::NotHandled) {
+    pushColorsMono(data, len, not_swapped);
+    if (done_cb) {
+      done_cb(user_ctx);
     }
-    if (!universal_panel->pushColors(data, len, not_swapped)) {
-        pushColorsMono(data, len, not_swapped);
-    }
+    return PushColorsResult::Complete;
+  }
+
+  return result;
 }
 
 // convert to mono, these are framebuffer based
@@ -111,12 +130,6 @@ void uDisplay::setAddrWindow(uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1)
         seta_yp1 = y0;
         seta_xp2 = x1;
         seta_yp2 = y1;
-    }
-}
-
-void uDisplay::setFlushDoneCB(FlushDoneCB cb, void *user_ctx) {
-    if (universal_panel) {
-        universal_panel->setFlushDoneCB(cb, user_ctx);
     }
 }
 

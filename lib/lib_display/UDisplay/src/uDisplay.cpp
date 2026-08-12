@@ -1155,6 +1155,10 @@ exit:
   return;
 }
 
+bool uDisplay::supportsLvglPsramBuffer(void) const {
+  return interface == _UDSP_DSI;
+}
+
 Renderer *uDisplay::Init(void) {
   if (!interface) {   // no valid configuration, abort
     #ifdef UDSP_DEBUG
@@ -1363,12 +1367,7 @@ if (interface == _UDSP_SPI) {
         
         universal_panel = new DSIPanel(panel_config->dsi);
         rgb_fb = universal_panel->framebuffer;
-        
-        // P4 DSI uses DMA2D to copy the LVGL draw buffer into the frame buffer; the copy
-        // completes asynchronously. With async_flush the LVGL flush_ready is deferred until
-        // the panel signals completion, avoiding the dropped-chunk race in draw_bitmap
-        lvgl_param.async_flush = 1;
-
+                
         HandeBP(-1);
      }
 #endif

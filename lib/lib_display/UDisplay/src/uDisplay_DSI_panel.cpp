@@ -95,17 +95,6 @@ DSIPanel::DSIPanel(const DSIPanelConfig& config)
     }
     AddLog(3, "DSI: DPI panel created");
 
-    // Register the draw-done callback: fired from the DMA2D completion ISR when the
-    // LVGL draw buffer has been copied into the frame buffer (enables async flush)
-    esp_lcd_dpi_panel_event_callbacks_t dpi_cbs = {
-        .on_color_trans_done = &DSIPanel::colorTransDoneCb,
-    };
-    ret = esp_lcd_dpi_panel_register_event_callbacks(panel_handle, &dpi_cbs, this);
-    if (ret != ESP_OK) {
-        AddLog(3, "DSI: Failed to register draw-done callback: %d", ret);
-        return;
-    }
-
     // Step 6: Reset via GPIO (from config)
     if (cfg.reset_pin >= 0) {
         gpio_config_t gpio_conf = {
@@ -131,6 +120,19 @@ DSIPanel::DSIPanel(const DSIPanelConfig& config)
         return;
     }
     AddLog(3, "DSI: DPI panel initialized");
+
+    // The callback is registered only after panel initialization.  ESP-IDF
+    // invokes it when DMA2D has copied the user buffer into the DPI framebuffer;
+    // this is the precise point at which the source buffer may be recycled.
+    esp_lcd_dpi_panel_event_callbacks_t dpi_cbs = {
+        .on_color_trans_done = &DSIPanel::colorTransDoneCb,
+    };
+    ret = esp_lcd_dpi_panel_register_event_callbacks(panel_handle, &dpi_cbs, this);
+    if (ret != ESP_OK) {
+        AddLog(3, "DSI: Failed to register draw-done callback: %d", ret);
+        return;
+    }
+    completion_callback_registered = true;
 
     // Step 8: Get framebuffer
     void* fb_ptr = nullptr;
@@ -226,8 +228,54 @@ bool DSIPanel::drawFastVLine(int16_t x, int16_t y, int16_t h, uint16_t color) {
 }
 
 bool DSIPanel::pushColors(uint16_t *data, uint32_t len, bool not_swapped) {
-    esp_err_t ret = esp_lcd_panel_draw_bitmap(panel_handle, window_x0, window_y0, window_x1, window_y1, data);
-    return (ret == ESP_OK);
+    // Preserve the legacy synchronous contract.  This is important for the
+    // non-LVGL image paths, which commonly reuse or free their source buffer
+    // immediately after pushColors() returns. There is intentionally no
+    // timeout: returning while DMA still owns data would violate that contract.
+    while (transfer_pending) {
+        delay(0);
+    }
+
+    volatile bool done = false;
+    PushColorsResult result = pushColorsAsync(data, len, not_swapped, &DSIPanel::syncDoneCb,
+                                              (void *)&done);
+    if (result == PushColorsResult::NotHandled || result == PushColorsResult::Error) {
+        return false;
+    }
+    while (!done) {
+        delay(0);
+    }
+    return true;
+}
+
+PushColorsResult DSIPanel::pushColorsAsync(uint16_t *data, uint32_t len, bool not_swapped,
+                                           FlushDoneCB done_cb, void *user_ctx) {
+    if (!completion_callback_registered) {
+        AddLog(3, "DSI: draw callback is not registered");
+        return PushColorsResult::Error;
+    }
+
+    // LVGL's deferred flush-ready prevents a second submission.  Report a
+    // collision to the caller instead of silently dropping the draw request.
+    if (transfer_pending) {
+        AddLog(3, "DSI: draw_bitmap submitted while previous transfer is pending");
+        return PushColorsResult::Error;
+    }
+
+    flush_done_cb = done_cb;
+    flush_done_user_ctx = user_ctx;
+    transfer_pending = true;
+
+    esp_err_t ret = esp_lcd_panel_draw_bitmap(panel_handle, window_x0, window_y0,
+                                              window_x1, window_y1, data);
+    if (ret != ESP_OK) {
+        transfer_pending = false;
+        flush_done_cb = nullptr;
+        flush_done_user_ctx = nullptr;
+        AddLog(3, "DSI: draw_bitmap failed: %d", ret);
+        return PushColorsResult::Error;
+    }
+    return PushColorsResult::Pending;
 }
 
 bool DSIPanel::setAddrWindow(int16_t x0, int16_t y0, int16_t x1, int16_t y1) {
@@ -296,19 +344,24 @@ bool DSIPanel::updateFrame() {
     return true;
 }
 
-void DSIPanel::setFlushDoneCB(FlushDoneCB cb, void *user_ctx) {
-    flush_done_cb = cb;
-    flush_done_user_ctx = user_ctx;
+void IRAM_ATTR DSIPanel::syncDoneCb(void *user_ctx) {
+    volatile bool *done = static_cast<volatile bool *>(user_ctx);
+    *done = true;
 }
 
-// Runs in the DMA2D completion ISR context (IRAM_ATTR), right after the ESP-IDF driver
-// released its draw semaphore - at this point the flushed LVGL buffer is safe to overwrite
+// Runs when the DMA2D copy has completed.  The source draw buffer is safe to
+// overwrite before the user callback is invoked.
 bool IRAM_ATTR DSIPanel::colorTransDoneCb(esp_lcd_panel_handle_t panel, esp_lcd_dpi_panel_event_data_t *edata, void *user_ctx) {
     DSIPanel *self = static_cast<DSIPanel*>(user_ctx);
-    if (self->flush_done_cb) {
-        self->flush_done_cb(self->flush_done_user_ctx);
+    FlushDoneCB done_cb = self->flush_done_cb;
+    void *done_ctx = self->flush_done_user_ctx;
+    self->flush_done_cb = nullptr;
+    self->flush_done_user_ctx = nullptr;
+    self->transfer_pending = false;
+    if (done_cb) {
+        done_cb(done_ctx);
     }
-    return false; // no task woken up
+    return false;
 }
 
 #endif // SOC_MIPI_DSI_SUPPORTED

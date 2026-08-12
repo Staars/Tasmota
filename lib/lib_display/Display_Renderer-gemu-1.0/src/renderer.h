@@ -37,7 +37,7 @@ typedef struct LVGL_PARAMS {
       uint8_t async_dma : 1;   // force DMA completion before returning, avoid conflict with other devices on same bus. If set you should make sure the display is the only device on the bus
       uint8_t busy_invert : 1;
       uint8_t invert_bw : 1;
-      uint8_t async_flush : 1; // defer lv_disp_flush_ready until the panel finished copying the draw buffer (async flush, e.g. P4 DSI DMA2D)
+      uint8_t prefer_psram : 1;  // DSI only: prefer PSRAM for the LVGL draw buffer
       uint8_t resvd_4 : 1;
       uint8_t resvd_5 : 1;
     };
@@ -46,7 +46,20 @@ typedef struct LVGL_PARAMS {
 
 typedef void (*pwr_cb)(uint8_t);
 typedef void (*dim_cb)(uint8_t);
-// Callback invoked (e.g. from an ISR) when the panel finished copying the LVGL draw buffer
+
+// Result of submitting a pixel buffer to a renderer. A non-null completion
+// callback is invoked exactly once for accepted buffers: before returning
+// Complete, or when a Pending buffer can be reused. It is not invoked for
+// NotHandled/Error.
+enum class PushColorsResult : uint8_t {
+  Complete,
+  Pending,
+  NotHandled,
+  Error
+};
+
+// Callback invoked when a submitted pixel buffer can be reused.  It may run
+// from an interrupt context for DMA-backed panels.
 typedef void (*FlushDoneCB)(void *user_ctx);
 
 #define USE_GFX
@@ -75,7 +88,13 @@ public:
   virtual void Updateframe();
   virtual void dim(uint8_t contrast);   // input has range 0..15
   virtual void dim10(uint8_t contrast, uint16_t contrast_gamma);  // input has range 0..255, second arg has gamma correction for PWM with 10 bits resolution
+  // Legacy synchronous API.  Keep this signature: several non-uDisplay
+  // renderers implement it directly.
   virtual void pushColors(uint16_t *data, uint32_t len, boolean first);
+  // Submit a buffer with an explicit lifetime callback.  The default adapter
+  // preserves synchronous behavior for existing renderers.
+  virtual PushColorsResult pushColorsAsync(uint16_t *data, uint32_t len, boolean first,
+                                            FlushDoneCB done_cb, void *user_ctx);
   virtual void setAddrWindow(uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1);
   virtual void invertDisplay(boolean i);
   virtual void reverseDisplay(boolean i);
@@ -91,9 +110,9 @@ public:
   virtual void Sleep(void);
   virtual char *devname(void);
   virtual LVGL_PARAMS *lvgl_pars(void);
-  // Register a callback fired when the panel finished copying a flushed draw buffer (async flush).
-  // Default no-op: only display backends that support async flush override this.
-  virtual void setFlushDoneCB(FlushDoneCB cb, void *user_ctx) {}
+  // Whether this renderer can use the DSI-specific LVGL PSRAM preference.
+  // Other renderers leave the selector ignored.
+  virtual bool supportsLvglPsramBuffer(void) const;
   virtual void ep_update_mode(uint8_t mode);
   virtual void ep_update_area(uint16_t xp, uint16_t yp, uint16_t width, uint16_t height, uint8_t mode);
   virtual uint32_t get_sr_touch(uint32_t xp, uint32_t xm, uint32_t yp, uint32_t ym);
