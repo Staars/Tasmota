@@ -106,8 +106,6 @@ SRP but are now part of the current build:
 | `bt_radio.c` MAC security fix | **Root cause** | No — required |
 | `CRYPTO_LIB = 0` (MBEDTLS) instead of `2` (PLATFORM/BearSSL) | Ruled out crypto; matches esp‑matter | **Yes** — can go back to BearSSL |
 | `bt_crypto_bearssl.cpp` wrapped in `#if 0` | Elimination debug | **Yes** — restore BearSSL |
-| `bt_hmac_mbedtls.cpp` — HMAC override via low‑level `mbedtls_sha256` | Worked around broken MD layer in prebuilt mbedtls | **Yes** — only needed for CRYPTO_LIB_MBEDTLS |
-| `bt_mbedtls_ecdsa_det.c` — provides `mbedtls_ecdsa_sign_det_ext()` | Missing from arduino‑esp32 prebuilt lib | **Yes** — only needed for CRYPTO_LIB_MBEDTLS |
 
 *Note: SRP SIG(0) uses ECDSA, not HMAC. HMAC is used by MLE, HKDF, etc.*
 
@@ -126,16 +124,6 @@ The current build has diagnostic overhead added during the CASE investigation:
 These should be removed or demoted to DEBUG level once the fix is confirmed
 stable across reboots / power cycles.
 
-### B. Re‑enable BearSSL + Berry SRP (long‑term)
-Goal: eliminate libs that matter‑device can't distribute.
-- **BearSSL crypto** — restore `CRYPTO_LIB_PLATFORM` and `bt_crypto_bearssl.cpp`
-  (currently `#if 0`). The MAC‑layer radio bug was the real problem; BearSSL
-  crypto was a red herring. HMAC override (`bt_hmac_mbedtls.cpp`) and ECDSA
-  shim (`bt_mbedtls_ecdsa_det.c`) become unnecessary.
-- **Berry SRP** — the hand‑rolled `Matter_SRP_Client.be` is dead but the
-  plan was always to go back to it after a working reference was established.
-  The native OT path now serves as that reference.
-
 ---
 
 ## Key files
@@ -145,8 +133,6 @@ Goal: eliminate libs that matter‑device can't distribute.
 | `lib/libesp32/BearThread/src/bt_radio.c` | Radio driver; MAC‑security TX bug fixed at line 278‑292 |
 | `lib/libesp32/BearThread/include/bearthread-core-config.h` | OT config; CRYPTO_LIB=0 now, was 2 |
 | `lib/libesp32/BearThread/src/bt_crypto_bearssl.cpp` | BearSSL crypto — `#if 0`'d, restore for BearSSL path |
-| `lib/libesp32/BearThread/src/bt_hmac_mbedtls.cpp` | HMAC override — only for CRYPTO_LIB_MBEDTLS |
-| `lib/libesp32/BearThread/src/bt_mbedtls_ecdsa_det.c` | Deterministic ECDSA wrapper — only for CRYPTO_LIB_MBEDTLS |
 | `lib/libesp32/BearThread/src/bt_misc.cpp` | `otPlatSettings*` persistence |
 | `tasmota/tasmota_xdrv_driver/xdrv_52_3_berry_thread.ino` | OT bindings: `srp_*`, callbacks |
 | `Matter_Thread_Device.be` | Berry Matter orchestrator |
