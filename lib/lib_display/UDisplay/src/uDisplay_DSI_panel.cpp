@@ -68,7 +68,7 @@ DSIPanel::DSIPanel(const DSIPanelConfig& config)
     // Step 4: Configure DPI panel (from config)
     esp_lcd_dpi_panel_config_t dpi_config = {};
     dpi_config.dpi_clk_src = MIPI_DSI_DPI_CLK_SRC_DEFAULT;
-    dpi_config.dpi_clock_freq_mhz = cfg.pixel_clock_hz / 1000000;
+    dpi_config.dpi_clock_freq_mhz = cfg.pixel_clock_hz / 1000000.0f;
     dpi_config.virtual_channel = 0;
     dpi_config.pixel_format = LCD_COLOR_PIXEL_FORMAT_RGB565;
     dpi_config.num_fbs = 1;
@@ -82,10 +82,12 @@ DSIPanel::DSIPanel(const DSIPanelConfig& config)
     dpi_config.video_timing.vsync_front_porch = cfg.timing.v_front_porch;
     dpi_config.flags.use_dma2d = 1;
     
-    AddLog(3, "DSI: DPI config: clk=%dMHz res=%dx%d", dpi_config.dpi_clock_freq_mhz, cfg.width, cfg.height);
+    AddLog(3, "DSI: DPI config: clk=%u.%03uMHz res=%ux%u",
+           static_cast<unsigned>(cfg.pixel_clock_hz / 1000000),
+           static_cast<unsigned>((cfg.pixel_clock_hz % 1000000) / 1000),
+           static_cast<unsigned>(cfg.width), static_cast<unsigned>(cfg.height));
     AddLog(3, "DSI: H timing: BP=%d PW=%d FP=%d", cfg.timing.h_back_porch, cfg.timing.h_sync_pulse, cfg.timing.h_front_porch);
     AddLog(3, "DSI: V timing: BP=%d PW=%d FP=%d", cfg.timing.v_back_porch, cfg.timing.v_sync_pulse, cfg.timing.v_front_porch);
-    AddLog(3, "DSI: Expected: clk=54MHz res=1024x600 H:160/40/160 V:23/10/12");
 
     // Step 5: Create DPI panel
     ret = esp_lcd_new_panel_dpi(dsi_bus, &dpi_config, &panel_handle);

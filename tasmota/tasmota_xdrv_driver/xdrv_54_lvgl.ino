@@ -33,6 +33,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
+#include "esp_memory_utils.h"
 
 // callback type when a screen paint is done
 typedef void (*lv_paint_cb_t)(int32_t x1, int32_t y1, int32_t x2, int32_t y2, uint8_t *pixels);
@@ -490,17 +491,16 @@ void start_lvgl(const char * uconfig) {
   // Allocate one draw buffer, plus a second only when use_dma requests it.
   bool status_ok = true;
   const bool prefer_psram = renderer->lvgl_param.prefer_psram && renderer->supportsLvglPsramBuffer();
+  uint32_t configured_flushlines = renderer->lvgl_pars()->flushlines;
+  if (0 == configured_flushlines) configured_flushlines = LV_BUFFER_ROWS;
   size_t lvgl_buffer_size;
   do {
-    uint32_t flushlines = renderer->lvgl_pars()->flushlines;
-    if (0 == flushlines) flushlines = LV_BUFFER_ROWS;
-
-    lvgl_buffer_size = renderer->width() * flushlines;
+    lvgl_buffer_size = renderer->width() * configured_flushlines;
     if (renderer->lvgl_pars()->use_dma) {
       lvgl_buffer_size /= 2;
       if (lvgl_buffer_size < 1000000) {
         const uint32_t buffer_size = lvgl_buffer_size * (LV_COLOR_DEPTH / 8);
-        AddLog(LOG_LEVEL_DEBUG, "LVG: Allocating buffer2 %i KB, preferring %s (flushlines %i)", buffer_size / 1024, prefer_psram ? "PSRAM" : "main memory", flushlines);
+        AddLog(LOG_LEVEL_DEBUG, "LVG: Allocating buffer2 %i KB, preferring %s (flushlines %i)", buffer_size / 1024, prefer_psram ? "PSRAM" : "main memory", configured_flushlines);
         lvgl_glue->lv_pixel_buf2 = prefer_psram
           ? heap_caps_malloc_prefer(buffer_size, 2, MALLOC_CAP_8BIT | MALLOC_CAP_SPIRAM, MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL)
           : heap_caps_malloc_prefer(buffer_size, 2, MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL, MALLOC_CAP_8BIT);
@@ -512,7 +512,7 @@ void start_lvgl(const char * uconfig) {
     }
 
     const uint32_t buffer_size = lvgl_buffer_size * (LV_COLOR_DEPTH / 8);
-    AddLog(LOG_LEVEL_DEBUG, "LVG: Allocating buffer1 %i KB, preferring %s (flushlines %i)", buffer_size / 1024, prefer_psram ? "PSRAM" : "main memory", flushlines);
+    AddLog(LOG_LEVEL_DEBUG, "LVG: Allocating buffer1 %i KB, preferring %s (flushlines %i)", buffer_size / 1024, prefer_psram ? "PSRAM" : "main memory", configured_flushlines);
     lvgl_glue->lv_pixel_buf = prefer_psram
       ? heap_caps_malloc_prefer(buffer_size, 2, MALLOC_CAP_8BIT | MALLOC_CAP_SPIRAM, MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL)
       : heap_caps_malloc_prefer(buffer_size, 2, MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL, MALLOC_CAP_8BIT);
@@ -535,6 +535,20 @@ void start_lvgl(const char * uconfig) {
     lvgl_glue = nullptr;
     AddLog(LOG_LEVEL_ERROR, "LVG: Could not allocate buffers");
     return;
+  }
+
+  if (renderer->supportsLvglPsramBuffer()) {
+    const bool double_buffered = lvgl_glue->lv_pixel_buf2 != nullptr;
+    const uint32_t rows_per_buffer = lvgl_buffer_size / renderer->width();
+    const uint32_t kb_per_buffer = (lvgl_buffer_size * (LV_COLOR_DEPTH / 8)) / 1024;
+    const char *buffer1_ram = esp_ptr_external_ram(lvgl_glue->lv_pixel_buf) ? "PSRAM" : "internal";
+    const char *buffer2_ram = double_buffered
+      ? (esp_ptr_external_ram(lvgl_glue->lv_pixel_buf2) ? "PSRAM" : "internal")
+      : "none";
+    AddLog(LOG_LEVEL_INFO,
+           "DSI: LVGL buffers=%s, :B lines=%u, rows/buffer=%u, size=%uKB, RAM=%s/%s",
+           double_buffered ? "double" : "single", configured_flushlines,
+           rows_per_buffer, kb_per_buffer, buffer1_ram, buffer2_ram);
   }
 
   // Initialize LvGL display driver

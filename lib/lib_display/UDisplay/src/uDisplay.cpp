@@ -776,8 +776,12 @@ uDisplay::uDisplay(char *lp) : Renderer(800, 600) {
             lvgl_param.flushlines = next_val(&lp1);
             lvgl_param.data = next_val(&lp1);
 #ifdef ESP32
-            // if(interface != _UDSP_SPI) // maybe test this later
-            lvgl_param.use_dma = false; // temporary fix to disable DMA due to a problem in esp-idf 5.3
+            // Keep the ESP-IDF 5.3 DMA workaround for the existing panel
+            // backends. DSI has its own DMA2D completion callback and needs
+            // this bit to give LVGL two draw buffers for render/copy overlap.
+            if (interface != _UDSP_DSI) {
+              lvgl_param.use_dma = false;
+            }
 #endif
             break;
           case 'M':
